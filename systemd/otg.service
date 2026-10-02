@@ -1,0 +1,19 @@
+[Unit]
+Description=Ask — Opencode Telegram Gateway
+After=opencode-serve.service
+Wants=opencode-serve.service
+
+[Service]
+Type=simple
+ExecStart=/home/clement/opencode-telegram-gateway/venv/bin/python /home/clement/opencode-telegram-gateway/otg/bot.py
+WorkingDirectory=/home/clement/opencode-telegram-gateway
+EnvironmentFile=/home/clement/opencode-telegram-gateway/bot.env
+Environment=OPENCODE_URL=http://127.0.0.1:4097
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

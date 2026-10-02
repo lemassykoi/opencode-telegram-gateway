@@ -30,14 +30,18 @@ Telegram <-> aiogram bot (allowlist, streaming edits, /stop relay)
   one Telegram message (throttled); tool activity shown as a status header.
 - `/stop`       -> `POST /session/:id/abort`
 - `/reset`      -> `DELETE /session/:id` + create fresh
-- Permission asks (`permission.updated` events) are **relayed to Telegram**
-  as inline yes/no buttons -> `POST /session/:id/permissions/:permissionID`.
+- Permission asks (`permission.asked` events) are **relayed to Telegram**
+  as inline yes/no buttons -> `POST /session/:id/permissions/:permissionID`
+  with `{"response": "once"|"reject"}` (never `always`).
+- Streaming: `message.part.delta` deltas (field `text`) accumulated per
+  part; `message.part.updated` snapshots are authoritative; `session.idle`
+  finalizes the turn.
 
 ## Decisions
 
 | Topic      | Choice                                                        |
 |------------|---------------------------------------------------------------|
-| Model      | `flashnext/qwen3.8-flash-next` (local llama-swap), set per message; `/model` later |
+| Model      | `flashnext/qwen3.8-flash-next` (local SGLang), set per message; `/model` later |
 | Working dir| `/home/clement` (project root; loads `AGENTS.md`)              |
 | Permission | Relay asks to Telegram (yes/no buttons), never auto-approve    |
 | Access     | Telegram user-ID allowlist is the only security boundary; server stays on localhost |
@@ -78,13 +82,34 @@ under current config (relay path still required for safety).
 - [x] Feasibility probe: serve + session + tool-using prompt round-trip
 - [x] Design decisions (model, permissions, working dir)
 - [x] `opencode-serve.service` unit
-- [ ] Bot: allowlist + session mapping + prompt/SSE plumbing
-- [ ] Permission relay with inline buttons
-- [ ] Streaming edit polish (flood limits, 4096 splits)
-- [ ] systemd wiring + docs for ops
-- [ ] Retire `~/qwen-tgbot` once OTG parity
+- [x] Bot: allowlist + session mapping + prompt/SSE plumbing
+- [x] Permission relay with inline buttons
+- [x] Streaming edit polish (flood limits, 4096 splits)
+- [x] systemd wiring + docs for ops
+- [ ] Retire `~/qwen-tgbot` once OTG parity (dir deleted 2026-10-02; live
+      parity check pending)
+
+## Operations
+
+```
+systemctl --user {status|restart|stop} otg opencode-serve
+journalctl --user -u otg -n 50 --no-pager
+```
+
+- Files: `systemd/*.service` symlinked into `~/.config/systemd/user/`
+  (edit in repo, then `systemctl --user daemon-reload`).
+- `bot.env` (gitignored): `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS`.
+  Only one getUpdates consumer per token — `hermes-gateway.service`
+  must stay disabled.
+- `state.json` (gitignored): chat_id -> session_id; delete or edit to
+  re-map chats; stale sessions are auto-recreated on next message.
+- Model/provider comes from `~/.config/opencode/opencode.json`
+  (`flashnext` = SGLang on 127.0.0.1:30001, key via file). The SGLang
+  engine runs as the `qwen38-flash` docker container.
+- Ops logs use `journalctl --user -u <unit> -n <N> --no-pager` (never bare
+  dumps).
 
 ## Relationship to ~/qwen-tgbot
 
-Prototype (direct sglang + MCP client loop). Stays running until OTG reaches
-parity, then is decommissioned.
+Prototype (direct sglang + MCP client loop). Decommissioned 2026-10-02:
+process killed, directory deleted, token now exclusively used by OTG.
