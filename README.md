@@ -92,6 +92,12 @@ under current config (relay path still required for safety).
 
 ## Next steps (new thread)
 
+- [ ] Welcome message at `/start` includes the user's first name
+- [ ] Gate: deny chatting until `/start` has been sent (track started
+      chats in state.json)
+- [ ] Variant switching (`/variant default|lean|low|medium|xhigh`) —
+      `prompt_async` accepts a `variant` field; variants are defined on
+      the model in `~/.config/opencode/opencode.json`
 - [ ] Custom message for rejected (non-allowlisted) users
 - [ ] Language setting (French / English) chosen at `/start`
 - [ ] Reply-keyboard "Menu" button grouping all commands (/reset /id …)
