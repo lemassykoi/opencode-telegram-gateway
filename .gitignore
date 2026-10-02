@@ -2,3 +2,4 @@ __pycache__/
 state.json
 *.env
 venv/
+AGENTS.md

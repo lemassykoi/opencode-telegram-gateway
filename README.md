@@ -86,8 +86,22 @@ under current config (relay path still required for safety).
 - [x] Permission relay with inline buttons
 - [x] Streaming edit polish (flood limits, 4096 splits)
 - [x] systemd wiring + docs for ops
-- [ ] Retire `~/qwen-tgbot` once OTG parity (dir deleted 2026-10-02; live
-      parity check pending)
+- [x] Retire `~/qwen-tgbot` (process killed incl. stray respawn, dir
+      deleted, live parity verified 2026-10-02: streaming, tool status,
+      permission buttons)
+
+## Next steps (new thread)
+
+- [ ] Custom message for rejected (non-allowlisted) users
+- [ ] Language setting (French / English) chosen at `/start`
+- [ ] Reply-keyboard "Menu" button grouping all commands (/reset /id …)
+- [ ] Output formatting for Telegram (the tricky one): assistant output
+      is raw markdown; choose MarkdownV2 vs HTML and implement the
+      conversion/escape pipeline (unformatted markdown currently ships
+      verbatim, e.g. `**bold**` and bullet lists render as literal text)
+- [ ] Per-turn metrics as a second, separate message: model, think time,
+      tokens/sec (SSE `session.status` + token counts on the assistant
+      message give the inputs)
 
 ## Operations
 
