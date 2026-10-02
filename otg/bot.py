@@ -394,9 +394,13 @@ async def main() -> None:
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=15))
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
-    asyncio.create_task(sse_loop())
+    sse = asyncio.create_task(sse_loop())
     log.info("Ask starting: model=%s allowed=%d chats=%d", MODEL["modelID"], len(ALLOWED), len(sessions))
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        sse.cancel()
+        await http.close()
 
 
 if __name__ == "__main__":
