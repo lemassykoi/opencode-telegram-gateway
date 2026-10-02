@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -18,7 +19,14 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -82,6 +90,59 @@ def split_tg(text: str) -> list[str]:
     return out
 
 
+def _esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def md_to_html(text: str) -> str:
+    """Best-effort markdown -> Telegram HTML; total function, never raises."""
+    store: list[str] = []
+
+    def keep(html: str) -> str:
+        store.append(html)
+        return f"\x00{len(store) - 1}\x00"
+
+    # fenced code blocks first; unterminated fences are closed implicitly
+    text = re.sub(r"```[^\n]*\n(.*?)```", lambda m: keep("<pre>" + _esc(m.group(1)) + "</pre>"), text, flags=re.S)
+    text = re.sub(r"```[^\n]*\n(.*)$", lambda m: keep("<pre>" + _esc(m.group(1)) + "</pre>"), text, flags=re.S)
+    # inline code
+    text = re.sub(r"`([^`\n]+)`", lambda m: keep("<code>" + _esc(m.group(1)) + "</code>"), text)
+    # escape the remaining prose, then apply inline markup on the escaped text
+    text = _esc(text)
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.S)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text, flags=re.S)
+    text = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?!\w)", r"<i>\1</i>", text)
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text, flags=re.S)
+    text = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", text)
+    return re.sub(r"\x00(\d+)\x00", lambda m: store[int(m.group(1))], text)
+
+
+async def tg_send(chat_id: int, text: str, html: bool = True):
+    if html:
+        h = md_to_html(text)
+        if len(h) <= TG_LIMIT:
+            try:
+                return await bot.send_message(chat_id, h, parse_mode="HTML")
+            except TelegramBadRequest as exc:
+                if "parse" not in str(exc).lower():
+                    raise
+    return await bot.send_message(chat_id, text[:TG_LIMIT])
+
+
+async def tg_edit(chat_id: int, msg_id: int, text: str, html: bool = True) -> None:
+    if html:
+        h = md_to_html(text)
+        if len(h) <= TG_LIMIT:
+            try:
+                await bot.edit_message_text(text=h, chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+                return
+            except TelegramBadRequest as exc:
+                if "parse" not in str(exc).lower():
+                    raise
+    await bot.edit_message_text(text=text[:TG_LIMIT], chat_id=chat_id, message_id=msg_id, parse_mode=None)
+
+
 class Renderer:
     """Accumulates one turn of assistant output and edits it into one TG message."""
 
@@ -95,6 +156,10 @@ class Renderer:
         self.notes: list[str] = []
         self.msg_id: int | None = None
         self.last_edit = 0.0
+        self.html_ok = True
+        self.first_delta = 0.0
+        self.m_msgs: dict[str, tuple[int, float]] = {}  # msg_id -> (out+reasoning tokens, cost)
+        self.m_model = MODEL["modelID"]
 
     def reset_turn(self) -> None:
         self.parts.clear()
@@ -102,6 +167,8 @@ class Renderer:
         self.tool_lines.clear()
         self.running_tools.clear()
         self.notes.clear()
+        self.first_delta = 0.0
+        self.m_msgs.clear()
 
     def on_part(self, part: dict) -> None:
         pid = part["id"]
@@ -125,7 +192,35 @@ class Renderer:
     def on_delta(self, props: dict) -> None:
         slot = self.parts.get(props["partID"])
         if slot is not None and slot["type"] == "text" and props.get("field") == "text":
+            if not props.get("delta"):
+                return
+            if not self.first_delta:
+                self.first_delta = time.monotonic()
             slot["text"] += props.get("delta", "")
+
+    def on_metrics(self, msg_id: str, tokens: dict, cost: float, model: str) -> None:
+        self.m_msgs[msg_id] = (
+            int(tokens.get("output", 0) or 0) + int(tokens.get("reasoning", 0) or 0),
+            float(cost or 0.0),
+        )
+        if model:
+            self.m_model = model
+
+    def turn_seconds(self) -> float:
+        return time.monotonic() - self.first_delta if self.first_delta else 0.0
+
+    def metrics_line(self) -> str:
+        out = sum(v[0] for v in self.m_msgs.values())
+        cost = sum(v[1] for v in self.m_msgs.values())
+        secs = self.turn_seconds()
+        bits = [f"📊 {self.m_model}"]
+        if secs > 0:
+            bits.append(f"⏱ {secs:.1f}s")
+        if out:
+            bits.append(f"{out} tok out" + (f" ({out / secs:.1f} tok/s)" if secs > 0 else ""))
+        if cost > 0:
+            bits.append(f"${cost:.4f}")
+        return " · ".join(bits) if len(bits) > 1 else ""
 
     def build_text(self) -> str:
         head = list(self.tool_lines)
@@ -140,14 +235,17 @@ class Renderer:
     async def _put(self, text: str) -> None:
         try:
             if self.msg_id is None:
-                sent = await bot.send_message(self.chat_id, text)
+                sent = await tg_send(self.chat_id, text, self.html_ok)
                 self.msg_id = sent.message_id
             else:
-                await bot.edit_message_text(text=text, chat_id=self.chat_id, message_id=self.msg_id)
+                await tg_edit(self.chat_id, self.msg_id, text, self.html_ok)
         except TelegramRetryAfter as exc:
             await asyncio.sleep(exc.retry_after)
         except TelegramBadRequest as exc:
-            if "not modified" not in str(exc).lower():
+            s = str(exc).lower()
+            if "parse" in s:
+                self.html_ok = False
+            elif "not modified" not in s:
                 log.debug("render: %s", exc)
 
     async def render(self) -> None:
@@ -163,9 +261,15 @@ class Renderer:
         await self._put(chunks[0])
         for extra in chunks[1:]:
             try:
-                await bot.send_message(self.chat_id, extra)
+                await tg_send(self.chat_id, extra, self.html_ok)
             except Exception as exc:
                 log.warning("finalize split: %s", exc)
+        line = self.metrics_line()
+        if line:
+            try:
+                await bot.send_message(self.chat_id, line)
+            except Exception as exc:
+                log.warning("metrics send: %s", exc)
 
 
 def _error_note(err: dict) -> str:
@@ -212,6 +316,10 @@ async def handle_event(ev: dict) -> None:
         roles[info.get("id", "")] = info.get("role", "")
         if info.get("error") and renderer:
             renderer.notes.append(_error_note(info["error"]))
+        if renderer and info.get("role") == "assistant" and (info.get("time") or {}).get("completed"):
+            renderer.on_metrics(
+                info.get("id", ""), info.get("tokens") or {}, info.get("cost") or 0, info.get("modelID") or ""
+            )
     elif etype == "message.part.updated":
         part = props.get("part", {})
         if renderer and roles.get(part.get("messageID", "")) == "assistant":

@@ -107,13 +107,13 @@ under current config (relay path still required for safety).
       includes their id)
 - [ ] Language setting (French / English) chosen at `/start`
 - [ ] Reply-keyboard "Menu" button grouping all commands (/reset /id …)
-- [ ] Output formatting for Telegram (the tricky one): assistant output
-      is raw markdown; choose MarkdownV2 vs HTML and implement the
-      conversion/escape pipeline (unformatted markdown currently ships
-      verbatim, e.g. `**bold**` and bullet lists render as literal text)
-- [ ] Per-turn metrics as a second, separate message: model, think time,
-      tokens/sec (SSE `session.status` + token counts on the assistant
-      message give the inputs)
+- [x] Output formatting for Telegram: **HTML** chosen (simplest escaping) —
+      `md_to_html()` converts fenced/inline code, bold, italic, strike,
+      headings, links; falls back to plain markdown on parse errors or
+      over-long HTML and disables HTML for that renderer
+- [x] Per-turn metrics as a separate message after each turn: model,
+      wall time (first delta -> idle), output tokens + tok/s, cost —
+      summed over all assistant messages of the turn
 
 ## Operations
 
