@@ -31,6 +31,7 @@ ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(",", "
 STATE_FILE = BASE_DIR / "state.json"
 EDIT_INTERVAL = 2.0
 TG_LIMIT = 4096
+API_TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 bot: Bot
 http: aiohttp.ClientSession
@@ -78,6 +79,13 @@ class Renderer:
         self.msg_id: int | None = None
         self.last_edit = 0.0
 
+    def reset_turn(self) -> None:
+        self.parts.clear()
+        self.done_tools.clear()
+        self.tool_lines.clear()
+        self.running_tools.clear()
+        self.notes.clear()
+
     def on_part(self, part: dict) -> None:
         pid = part["id"]
         ptype = part.get("type", "")
@@ -118,7 +126,7 @@ class Renderer:
                 sent = await bot.send_message(self.chat_id, text)
                 self.msg_id = sent.message_id
             else:
-                await bot.edit_message_text(self.chat_id, self.msg_id, text)
+                await bot.edit_message_text(text=text, chat_id=self.chat_id, message_id=self.msg_id)
         except TelegramRetryAfter as exc:
             await asyncio.sleep(exc.retry_after)
         except TelegramBadRequest as exc:
@@ -151,10 +159,10 @@ def _error_note(err: dict) -> str:
 async def ensure_session(chat_id: int) -> str:
     sid = sessions.get(chat_id)
     if sid:
-        async with http.get(f"{OPENCODE_URL}/session/{sid}") as r:
+        async with http.get(f"{OPENCODE_URL}/session/{sid}", timeout=API_TIMEOUT) as r:
             if r.status == 200:
                 return sid
-    async with http.post(f"{OPENCODE_URL}/session", json={"title": f"tg:{chat_id}"}) as r:
+    async with http.post(f"{OPENCODE_URL}/session", json={"title": f"tg:{chat_id}"}, timeout=API_TIMEOUT) as r:
         r.raise_for_status()
         sid = (await r.json())["id"]
     sessions[chat_id] = sid
@@ -193,7 +201,9 @@ async def handle_event(ev: dict) -> None:
         if resolve:
             c, m = resolve
             try:
-                await bot.edit_message_text(c, m, "✔️ permission resolved", reply_markup=None)
+                await bot.edit_message_text(
+                    text="✔️ permission resolved", chat_id=c, message_id=m, reply_markup=None
+                )
             except TelegramBadRequest:
                 pass
     elif etype == "session.error":
@@ -222,11 +232,45 @@ async def ask_permission(chat_id: int, props: dict) -> None:
     perm_msgs[pid] = (chat_id, msg.message_id)
 
 
+async def resync() -> None:
+    """After SSE reconnect: rebuild active renderers from history; finalize finished ones."""
+    if not renderers:
+        return
+    try:
+        async with http.get(f"{OPENCODE_URL}/session/status", timeout=API_TIMEOUT) as r:
+            statuses = await r.json() if r.status == 200 else {}
+    except Exception:
+        statuses = {}
+    for sid, renderer in list(renderers.items()):
+        try:
+            async with http.get(f"{OPENCODE_URL}/session/{sid}/message", timeout=API_TIMEOUT) as r:
+                if r.status != 200:
+                    continue
+                items = await r.json()
+        except Exception:
+            continue
+        start = max(
+            (i for i, it in enumerate(items) if it.get("info", {}).get("role") == "user"),
+            default=-1,
+        )
+        renderer.reset_turn()
+        for item in items[start:]:
+            info = item.get("info", {})
+            roles[info.get("id", "")] = info.get("role", "")
+            if info.get("role") == "assistant":
+                for part in item.get("parts", []):
+                    renderer.on_part(part)
+        if statuses.get(sid, {}).get("type", "idle") == "idle":
+            renderers.pop(sid, None)
+            await renderer.finalize()
+
+
 async def sse_loop() -> None:
     while True:
         try:
             async with http.get(f"{OPENCODE_URL}/event") as r:
                 r.raise_for_status()
+                await resync()
                 async for raw in r.content:
                     line = raw.decode(errors="replace").strip()
                     if not line.startswith("data:"):
@@ -279,7 +323,7 @@ async def cmd_reset(message: Message) -> None:
     if sid:
         renderers.pop(sid, None)
         try:
-            async with http.delete(f"{OPENCODE_URL}/session/{sid}") as r:
+            async with http.delete(f"{OPENCODE_URL}/session/{sid}", timeout=API_TIMEOUT) as r:
                 pass
         except Exception:
             log.warning("reset: delete failed for %s", sid)
@@ -294,7 +338,7 @@ async def cmd_stop(message: Message) -> None:
     if not sid or sid not in renderers:
         await message.answer("nothing running")
         return
-    async with http.post(f"{OPENCODE_URL}/session/{sid}/abort", json={}) as r:
+    async with http.post(f"{OPENCODE_URL}/session/{sid}/abort", json={}, timeout=API_TIMEOUT) as r:
         await message.answer("🛑 stopping…" if r.status in (200, 204) else f"abort failed ({r.status})")
 
 
@@ -309,7 +353,7 @@ async def on_perm_cb(cb: CallbackQuery) -> None:
     ok = False
     try:
         async with http.post(
-            f"{OPENCODE_URL}/session/{sid}/permissions/{pid}", json={"response": decision}
+            f"{OPENCODE_URL}/session/{sid}/permissions/{pid}", json={"response": decision}, timeout=API_TIMEOUT
         ) as r:
             ok = r.status in (200, 204)
     except Exception:
@@ -335,6 +379,7 @@ async def on_text(message: Message) -> None:
         async with http.post(
             f"{OPENCODE_URL}/session/{sid}/prompt_async",
             json={"model": MODEL, "parts": [{"type": "text", "text": message.text}]},
+            timeout=API_TIMEOUT,
         ) as r:
             if r.status not in (200, 204):
                 raise RuntimeError(f"prompt_async {r.status}: {(await r.text())[:200]}")
@@ -346,7 +391,7 @@ async def on_text(message: Message) -> None:
 async def main() -> None:
     global bot, http
     load_state()
-    http = aiohttp.ClientSession()
+    http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=15))
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(sse_loop())
