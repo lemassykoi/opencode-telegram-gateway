@@ -77,7 +77,7 @@ under current config (relay path still required for safety).
 
 - [x] Feasibility probe: serve + session + tool-using prompt round-trip
 - [x] Design decisions (model, permissions, working dir)
-- [ ] `opencode-serve.service` unit
+- [x] `opencode-serve.service` unit
 - [ ] Bot: allowlist + session mapping + prompt/SSE plumbing
 - [ ] Permission relay with inline buttons
 - [ ] Streaming edit polish (flood limits, 4096 splits)
