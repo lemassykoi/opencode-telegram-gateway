@@ -98,6 +98,14 @@ under current config (relay path still required for safety).
 - [ ] Variant switching (`/variant default|lean|low|medium|xhigh`) —
       `prompt_async` accepts a `variant` field; variants are defined on
       the model in `~/.config/opencode/opencode.json`
+- [ ] `/session` command printing the session_id so the owner can resume
+      the same conversation from the desktop (`opencode sessions`);
+      today `/id` already returns the session id — redefine `/id` to
+      Telegram user id and give `/session` its own handler
+- [ ] Pretty session titles for the librarian (LAN session collector):
+      replace `tg:<chat_id>` with e.g. "Telegram Session from Clement
+      (@username) 2026-10-02" — static string from `from_user` + date at
+      session creation, no AI needed
 - [ ] Custom message for rejected (non-allowlisted) users
 - [ ] Language setting (French / English) chosen at `/start`
 - [ ] Reply-keyboard "Menu" button grouping all commands (/reset /id …)
