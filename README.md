@@ -92,21 +92,19 @@ under current config (relay path still required for safety).
 
 ## Next steps (new thread)
 
-- [ ] Welcome message at `/start` includes the user's first name
-- [ ] Gate: deny chatting until `/start` has been sent (track started
-      chats in state.json)
-- [ ] Variant switching (`/variant default|lean|low|medium|xhigh`) —
-      `prompt_async` accepts a `variant` field; variants are defined on
-      the model in `~/.config/opencode/opencode.json`
-- [ ] `/session` command printing the session_id so the owner can resume
-      the same conversation from the desktop (`opencode sessions`);
-      today `/id` already returns the session id — redefine `/id` to
-      Telegram user id and give `/session` its own handler
-- [ ] Pretty session titles for the librarian (LAN session collector):
-      replace `tg:<chat_id>` with e.g. "Telegram Session from Clement
-      (@username) 2026-10-02" — static string from `from_user` + date at
-      session creation, no AI needed
-- [ ] Custom message for rejected (non-allowlisted) users
+- [x] Welcome message at `/start` includes the user's first name
+- [x] Gate: deny chatting until `/start` has been sent (tracked in
+      state.json; legacy chats auto-migrated as started)
+- [x] Variant switching (`/variant default|lean|low|medium|xhigh`) —
+      stored per chat in state.json, passed to `prompt_async` as
+      `variant` (verified accepted: 204)
+- [x] `/session` command printing the session_id so the owner can resume
+      the conversation from the desktop; `/id` now returns the Telegram
+      user id
+- [x] Pretty session titles: "Telegram Session from Clement (@username)
+      YYYY-MM-DD" built from `from_user` at session creation
+- [x] Custom message for rejected (non-allowlisted) users (one-time,
+      includes their id)
 - [ ] Language setting (French / English) chosen at `/start`
 - [ ] Reply-keyboard "Menu" button grouping all commands (/reset /id …)
 - [ ] Output formatting for Telegram (the tricky one): assistant output
@@ -129,8 +127,10 @@ journalctl --user -u otg -n 50 --no-pager
 - `bot.env` (gitignored): `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS`.
   Only one getUpdates consumer per token — `hermes-gateway.service`
   must stay disabled.
-- `state.json` (gitignored): chat_id -> session_id; delete or edit to
-  re-map chats; stale sessions are auto-recreated on next message.
+- `state.json` (gitignored): chat_id -> `{session_id, started, variant}`
+  (legacy flat `chat_id -> session_id` maps migrate on load, keeping
+  those chats started); delete or edit to re-map chats; stale sessions
+  are auto-recreated on next message.
 - Model/provider comes from `~/.config/opencode/opencode.json`
   (`flashnext` = SGLang on 127.0.0.1:30001, key via file). The SGLang
   engine runs as the `qwen38-flash` docker container.

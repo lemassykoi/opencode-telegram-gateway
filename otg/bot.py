@@ -32,11 +32,17 @@ STATE_FILE = BASE_DIR / "state.json"
 EDIT_INTERVAL = 2.0
 TG_LIMIT = 4096
 API_TIMEOUT = aiohttp.ClientTimeout(total=30)
+VARIANTS = ("lean", "low", "medium", "xhigh")
+DENY_MSG = (
+    "⛔ Sorry — Ask is a private gateway and you're not on its allowlist.\n"
+    "Your Telegram user id: {id}\n"
+    "Ask the machine owner to add it to ALLOWED_USER_IDS."
+)
 
 bot: Bot
 http: aiohttp.ClientSession
 dp = Dispatcher()
-sessions: dict[int, str] = {}  # chat_id -> session_id
+chats: dict[int, dict] = {}  # chat_id -> {"session_id", "started", "variant"}
 renderers: dict[str, "Renderer"] = {}  # session_id -> active renderer
 roles: dict[str, str] = {}  # opencode message_id -> role
 perm_msgs: dict[str, tuple[int, int]] = {}  # permission_id -> (chat_id, tg_message_id)
@@ -44,12 +50,23 @@ unknown_notified: set[int] = set()
 
 
 def load_state() -> None:
-    if STATE_FILE.is_file():
-        sessions.update({int(k): v for k, v in json.loads(STATE_FILE.read_text()).items()})
+    if not STATE_FILE.is_file():
+        return
+    for k, v in json.loads(STATE_FILE.read_text()).items():
+        if isinstance(v, str):  # legacy flat chat_id -> session_id
+            v = {"session_id": v}
+        v.setdefault("session_id", None)
+        v.setdefault("started", True)  # chats predating the /start gate stay open
+        v.setdefault("variant", None)
+        chats[int(k)] = v
 
 
 def save_state() -> None:
-    STATE_FILE.write_text(json.dumps({str(k): v for k, v in sessions.items()}))
+    STATE_FILE.write_text(json.dumps({str(k): v for k, v in chats.items()}))
+
+
+def meta_of(chat_id: int) -> dict:
+    return chats.setdefault(chat_id, {"session_id": None, "started": False, "variant": None})
 
 
 def split_tg(text: str) -> list[str]:
@@ -156,16 +173,26 @@ def _error_note(err: dict) -> str:
     return f"⚠️ {err.get('name', 'error')}: {data.get('message', '')}".strip()
 
 
-async def ensure_session(chat_id: int) -> str:
-    sid = sessions.get(chat_id)
+def session_title(user) -> str:  # noqa: ANN001
+    if user is None:
+        return "Telegram Session"
+    handle = f" (@{user.username})" if user.username else ""
+    return f"Telegram Session from {user.first_name or 'unnamed'}{handle} {time.strftime('%Y-%m-%d')}"
+
+
+async def ensure_session(chat_id: int, user=None) -> str:  # noqa: ANN001
+    meta = meta_of(chat_id)
+    sid = meta.get("session_id")
     if sid:
         async with http.get(f"{OPENCODE_URL}/session/{sid}", timeout=API_TIMEOUT) as r:
             if r.status == 200:
                 return sid
-    async with http.post(f"{OPENCODE_URL}/session", json={"title": f"tg:{chat_id}"}, timeout=API_TIMEOUT) as r:
+    async with http.post(
+        f"{OPENCODE_URL}/session", json={"title": session_title(user)}, timeout=API_TIMEOUT
+    ) as r:
         r.raise_for_status()
         sid = (await r.json())["id"]
-    sessions[chat_id] = sid
+    meta["session_id"] = sid
     save_state()
     return sid
 
@@ -175,7 +202,7 @@ async def handle_event(ev: dict) -> None:
     sid = props.get("sessionID")
     if not sid:
         return
-    chat_id = next((c for c, s in sessions.items() if s == sid), None)
+    chat_id = next((c for c, v in chats.items() if v.get("session_id") == sid), None)
     if chat_id is None:
         return
     renderer = renderers.get(sid)
@@ -293,10 +320,14 @@ async def gate(handler, event, *args, **kwargs):  # noqa: ANN001
             unknown_notified.add(user.id)
             log.info("unauthorized sender id: %s", user.id)
             if isinstance(event, Message):
-                await event.answer(f"⛔ you are not on the allowlist. your id: {user.id}")
+                await event.answer(DENY_MSG.format(id=user.id))
             elif isinstance(event, CallbackQuery):
                 await event.answer("not allowed", show_alert=True)
         return
+    if isinstance(event, Message) and not (event.text or "").startswith("/start"):
+        if not chats.get(event.chat.id, {}).get("started"):
+            await event.answer("👋 Send /start to begin.")
+            return
     return await handler(event, *args, **kwargs)
 
 
@@ -306,20 +337,53 @@ dp.callback_query.outer_middleware.register(gate)
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    meta = meta_of(message.chat.id)
+    meta["started"] = True
+    save_state()
+    name = message.from_user.first_name if message.from_user else "there"
     await message.answer(
-        "I'm Ask — your opencode gateway. Each message runs as an agent on this "
-        "machine; any tool use asks you first.\nCommands: /stop /reset /id"
+        f"Hi {name}! I'm Ask — your opencode gateway. Every message runs as an agent "
+        "on this machine; any tool use asks you first.\n"
+        "Commands: /stop /reset /session /variant /id"
     )
 
 
 @dp.message(Command("id"))
 async def cmd_id(message: Message) -> None:
-    await message.answer(f"session: {sessions.get(message.chat.id, '(none yet)')}")
+    await message.answer(f"your telegram user id: {message.from_user.id}")
+
+
+@dp.message(Command("session"))
+async def cmd_session(message: Message) -> None:
+    sid = chats.get(message.chat.id, {}).get("session_id")
+    await message.answer(f"session: {sid or '(none yet — send a message first)'}")
+
+
+@dp.message(Command("variant"))
+async def cmd_variant(message: Message) -> None:
+    meta = meta_of(message.chat.id)
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer(
+            f"current variant: {meta.get('variant') or 'default'}\n"
+            f"usage: /variant default|{'|'.join(VARIANTS)}"
+        )
+        return
+    val = args[1].lower()
+    if val in ("default", "none", "off"):
+        meta["variant"] = None
+    elif val in VARIANTS:
+        meta["variant"] = val
+    else:
+        await message.answer(f"unknown variant: {val}\nuse default|{'|'.join(VARIANTS)}")
+        return
+    save_state()
+    await message.answer(f"variant set: {meta['variant'] or 'default'}")
 
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
-    sid = sessions.pop(message.chat.id, None)
+    sid = meta_of(message.chat.id).pop("session_id", None)
     if sid:
         renderers.pop(sid, None)
         try:
@@ -328,13 +392,13 @@ async def cmd_reset(message: Message) -> None:
         except Exception:
             log.warning("reset: delete failed for %s", sid)
     save_state()
-    new_sid = await ensure_session(message.chat.id)
+    new_sid = await ensure_session(message.chat.id, message.from_user)
     await message.answer(f"🧹 new session {new_sid}")
 
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: Message) -> None:
-    sid = sessions.get(message.chat.id)
+    sid = chats.get(message.chat.id, {}).get("session_id")
     if not sid or sid not in renderers:
         await message.answer("nothing running")
         return
@@ -349,7 +413,7 @@ async def on_perm_cb(cb: CallbackQuery) -> None:
     if not entry or cb.message is None or cb.message.chat.id != entry[0]:
         await cb.answer("already answered", show_alert=True)
         return
-    sid = sessions.get(entry[0], "")
+    sid = chats.get(entry[0], {}).get("session_id", "")
     ok = False
     try:
         async with http.post(
@@ -369,16 +433,20 @@ async def on_perm_cb(cb: CallbackQuery) -> None:
 @dp.message(F.text & ~F.text.startswith("/"))
 async def on_text(message: Message) -> None:
     chat_id = message.chat.id
-    sid = await ensure_session(chat_id)
+    sid = await ensure_session(chat_id, message.from_user)
     if sid in renderers:
         await message.reply("⏳ still working — /stop to cancel")
         return
     renderer = Renderer(chat_id, sid)
     renderers[sid] = renderer
+    body: dict = {"model": MODEL, "parts": [{"type": "text", "text": message.text}]}
+    variant = chats.get(chat_id, {}).get("variant")
+    if variant:
+        body["variant"] = variant
     try:
         async with http.post(
             f"{OPENCODE_URL}/session/{sid}/prompt_async",
-            json={"model": MODEL, "parts": [{"type": "text", "text": message.text}]},
+            json=body,
             timeout=API_TIMEOUT,
         ) as r:
             if r.status not in (200, 204):
@@ -395,7 +463,7 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
     sse = asyncio.create_task(sse_loop())
-    log.info("Ask starting: model=%s allowed=%d chats=%d", MODEL["modelID"], len(ALLOWED), len(sessions))
+    log.info("Ask starting: model=%s allowed=%d chats=%d", MODEL["modelID"], len(ALLOWED), len(chats))
     try:
         await dp.start_polling(bot)
     finally:
