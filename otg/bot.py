@@ -46,6 +46,57 @@ DENY_MSG = (
     "Your Telegram user id: {id}\n"
     "Ask the machine owner to add it to ALLOWED_USER_IDS."
 )
+COPY = {
+    "en": {
+        "welcome": "Hi{name}! I'm Ask — your opencode gateway. Every message runs as "
+        "an agent on this machine; any tool use asks you first.\n"
+        "Commands: /stop /reset /session /variant /id",
+        "pick_lang": "🌐 Choose your language / Choisis ta langue :",
+        "menu_label": "Commands:",
+        "need_start": "👋 Send /start to begin.",
+        "still_working": "⏳ still working — /stop to cancel",
+        "variant_usage": "current variant: {cur}\nusage: /variant default|{opts}",
+        "variant_set": "variant set: {val}",
+        "variant_unknown": "unknown variant: {val}\nuse default|{opts}",
+        "your_id": "your telegram user id: {id}",
+        "session": "session: {sid}",
+        "session_none": "session: (none yet — send a message first)",
+        "reset_done": "🧹 new session {sid}",
+        "nothing_running": "nothing running",
+        "stopping": "🛑 stopping…",
+        "abort_failed": "abort failed ({status})",
+        "perm": "🔐 Ask needs approval — {perm}\n{detail}",
+    },
+    "fr": {
+        "welcome": "Salut{name}! Je suis Ask — ta passerelle opencode. Chaque message "
+        "lance un agent sur cette machine ; toute utilisation d'outil te demande "
+        "d'abord.\nCommandes : /stop /reset /session /variant /id",
+        "pick_lang": "🌐 Choose your language / Choisis ta langue :",
+        "menu_label": "Commandes :",
+        "need_start": "👋 Envoie /start pour commencer.",
+        "still_working": "⏳ traitement en cours — /stop pour annuler",
+        "variant_usage": "variante actuelle : {cur}\nusage : /variant default|{opts}",
+        "variant_set": "variante définie : {val}",
+        "variant_unknown": "variante inconnue : {val}\nchoix : default|{opts}",
+        "your_id": "ton id utilisateur Telegram : {id}",
+        "session": "session : {sid}",
+        "session_none": "session : (aucune pour l'instant — envoie d'abord un message)",
+        "reset_done": "🧹 nouvelle session {sid}",
+        "nothing_running": "rien en cours",
+        "stopping": "🛑 arrêt en cours…",
+        "abort_failed": "échec de l'arrêt ({status})",
+        "perm": "🔐 Ask a besoin d'approbation — {perm}\n{detail}",
+    },
+}
+MENU = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="/stop"), KeyboardButton(text="/reset")],
+        [KeyboardButton(text="/session"), KeyboardButton(text="/variant")],
+        [KeyboardButton(text="/id")],
+    ],
+    resize_keyboard=True,
+    persistent=True,
+)
 
 bot: Bot
 http: aiohttp.ClientSession
@@ -66,6 +117,7 @@ def load_state() -> None:
         v.setdefault("session_id", None)
         v.setdefault("started", True)  # chats predating the /start gate stay open
         v.setdefault("variant", None)
+        v.setdefault("lang", None)
         chats[int(k)] = v
 
 
@@ -75,6 +127,10 @@ def save_state() -> None:
 
 def meta_of(chat_id: int) -> dict:
     return chats.setdefault(chat_id, {"session_id": None, "started": False, "variant": None})
+
+
+def L(chat_id: int) -> dict:
+    return COPY.get((chats.get(chat_id) or {}).get("lang") or "en", COPY["en"])
 
 
 def split_tg(text: str) -> list[str]:
@@ -362,7 +418,8 @@ async def ask_permission(chat_id: int, props: dict) -> None:
         ]]
     )
     msg = await bot.send_message(
-        chat_id, f"🔐 Ask needs approval — {props.get('permission', '?')}\n{detail}"[:TG_LIMIT], reply_markup=kb
+        chat_id, L(chat_id)["perm"].format(perm=props.get("permission", "?"), detail=detail)[:TG_LIMIT],
+        reply_markup=kb,
     )
     perm_msgs[pid] = (chat_id, msg.message_id)
 
@@ -434,7 +491,7 @@ async def gate(handler, event, *args, **kwargs):  # noqa: ANN001
         return
     if isinstance(event, Message) and not (event.text or "").startswith("/start"):
         if not chats.get(event.chat.id, {}).get("started"):
-            await event.answer("👋 Send /start to begin.")
+            await event.answer(L(event.chat.id)["need_start"])
             return
     return await handler(event, *args, **kwargs)
 
@@ -447,35 +504,62 @@ dp.callback_query.outer_middleware.register(gate)
 async def cmd_start(message: Message) -> None:
     meta = meta_of(message.chat.id)
     meta["started"] = True
+    arg = (message.text or "").split()[1:]
+    if arg:
+        v = arg[0].lower()
+        if v.startswith("fr"):
+            meta["lang"] = "fr"
+        elif v.startswith("en"):
+            meta["lang"] = "en"
     save_state()
-    name = message.from_user.first_name if message.from_user else "there"
-    await message.answer(
-        f"Hi {name}! I'm Ask — your opencode gateway. Every message runs as an agent "
-        "on this machine; any tool use asks you first.\n"
-        "Commands: /stop /reset /session /variant /id"
+    name = f" {message.from_user.first_name}" if message.from_user and message.from_user.first_name else ""
+    lang = meta.get("lang")
+    c = COPY.get(lang or "en", COPY["en"])
+    if lang:
+        await message.answer(c["welcome"].format(name=name), reply_markup=MENU)
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="🇫🇷 Français", callback_data="lang|fr"),
+            InlineKeyboardButton(text="🇬🇧 English", callback_data="lang|en"),
+        ]]
     )
+    await message.answer(c["welcome"].format(name=name) + "\n\n" + c["pick_lang"], reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("lang|"))
+async def on_lang_cb(cb: CallbackQuery) -> None:
+    lang = cb.data.split("|", 1)[1]
+    if cb.message is None or cb.message.chat is None or lang not in COPY:
+        await cb.answer("bad request", show_alert=True)
+        return
+    meta_of(cb.message.chat.id)["lang"] = lang
+    save_state()
+    name = f" {cb.from_user.first_name}" if cb.from_user.first_name else ""
+    await cb.message.edit_text(COPY[lang]["welcome"].format(name=name), reply_markup=None)
+    await bot.send_message(cb.message.chat.id, COPY[lang]["menu_label"], reply_markup=MENU)
+    await cb.answer("ok")
 
 
 @dp.message(Command("id"))
 async def cmd_id(message: Message) -> None:
-    await message.answer(f"your telegram user id: {message.from_user.id}")
+    await message.answer(L(message.chat.id)["your_id"].format(id=message.from_user.id))
 
 
 @dp.message(Command("session"))
 async def cmd_session(message: Message) -> None:
+    c = L(message.chat.id)
     sid = chats.get(message.chat.id, {}).get("session_id")
-    await message.answer(f"session: {sid or '(none yet — send a message first)'}")
+    await message.answer(c["session"].format(sid=sid) if sid else c["session_none"])
 
 
 @dp.message(Command("variant"))
 async def cmd_variant(message: Message) -> None:
-    meta = meta_of(message.chat.id)
+    meta, c = meta_of(message.chat.id), L(message.chat.id)
+    opts = "|".join(VARIANTS)
     args = (message.text or "").split()
     if len(args) < 2:
-        await message.answer(
-            f"current variant: {meta.get('variant') or 'default'}\n"
-            f"usage: /variant default|{'|'.join(VARIANTS)}"
-        )
+        await message.answer(c["variant_usage"].format(cur=meta.get("variant") or "default", opts=opts))
         return
     val = args[1].lower()
     if val in ("default", "none", "off"):
@@ -483,10 +567,10 @@ async def cmd_variant(message: Message) -> None:
     elif val in VARIANTS:
         meta["variant"] = val
     else:
-        await message.answer(f"unknown variant: {val}\nuse default|{'|'.join(VARIANTS)}")
+        await message.answer(c["variant_unknown"].format(val=val, opts=opts))
         return
     save_state()
-    await message.answer(f"variant set: {meta['variant'] or 'default'}")
+    await message.answer(c["variant_set"].format(val=meta["variant"] or "default"))
 
 
 @dp.message(Command("reset"))
@@ -501,17 +585,20 @@ async def cmd_reset(message: Message) -> None:
             log.warning("reset: delete failed for %s", sid)
     save_state()
     new_sid = await ensure_session(message.chat.id, message.from_user)
-    await message.answer(f"🧹 new session {new_sid}")
+    await message.answer(L(message.chat.id)["reset_done"].format(sid=new_sid))
 
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: Message) -> None:
     sid = chats.get(message.chat.id, {}).get("session_id")
+    c = L(message.chat.id)
     if not sid or sid not in renderers:
-        await message.answer("nothing running")
+        await message.answer(c["nothing_running"])
         return
     async with http.post(f"{OPENCODE_URL}/session/{sid}/abort", json={}, timeout=API_TIMEOUT) as r:
-        await message.answer("🛑 stopping…" if r.status in (200, 204) else f"abort failed ({r.status})")
+        await message.answer(
+            c["stopping"] if r.status in (200, 204) else c["abort_failed"].format(status=r.status)
+        )
 
 
 @dp.callback_query(F.data.startswith("perm|"))
@@ -543,7 +630,7 @@ async def on_text(message: Message) -> None:
     chat_id = message.chat.id
     sid = await ensure_session(chat_id, message.from_user)
     if sid in renderers:
-        await message.reply("⏳ still working — /stop to cancel")
+        await message.reply(L(chat_id)["still_working"])
         return
     renderer = Renderer(chat_id, sid)
     renderers[sid] = renderer

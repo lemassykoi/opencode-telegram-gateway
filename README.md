@@ -105,8 +105,12 @@ under current config (relay path still required for safety).
       YYYY-MM-DD" built from `from_user` at session creation
 - [x] Custom message for rejected (non-allowlisted) users (one-time,
       includes their id)
-- [ ] Language setting (French / English) chosen at `/start`
-- [ ] Reply-keyboard "Menu" button grouping all commands (/reset /id …)
+- [x] Language setting (French / English): `/start` offers 🇫🇷/🇬🇧 inline
+      buttons (or `/start fr|en`); stored in state.json, all bot replies
+      and the permission prompt localized from `COPY`
+- [x] Reply-keyboard "Menu" button grouping all commands — attached
+      after the welcome (persistent, resize; buttons send the plain
+      commands)
 - [x] Output formatting for Telegram: **HTML** chosen (simplest escaping) —
       `md_to_html()` converts fenced/inline code, bold, italic, strike,
       headings, links; falls back to plain markdown on parse errors or
@@ -127,10 +131,10 @@ journalctl --user -u otg -n 50 --no-pager
 - `bot.env` (gitignored): `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS`.
   Only one getUpdates consumer per token — `hermes-gateway.service`
   must stay disabled.
-- `state.json` (gitignored): chat_id -> `{session_id, started, variant}`
-  (legacy flat `chat_id -> session_id` maps migrate on load, keeping
-  those chats started); delete or edit to re-map chats; stale sessions
-  are auto-recreated on next message.
+- `state.json` (gitignored): chat_id -> `{session_id, started, variant,
+  lang}` (legacy flat `chat_id -> session_id` maps migrate on load,
+  keeping those chats started); delete or edit to re-map chats; stale
+  sessions are auto-recreated on next message.
 - Model/provider comes from `~/.config/opencode/opencode.json`
   (`flashnext` = SGLang on 127.0.0.1:30001, key via file). The SGLang
   engine runs as the `qwen38-flash` docker container.
