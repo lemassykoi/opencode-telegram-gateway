@@ -34,6 +34,7 @@ log = logging.getLogger("otg")
 
 OPENCODE_URL = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4097")
 MODEL = {"providerID": "flashnext", "modelID": "qwen3.8-flash-next"}
+AGENT = os.environ.get("OTG_AGENT", "ask")
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(",", " ").split()}
 STATE_FILE = BASE_DIR / "state.json"
@@ -634,7 +635,7 @@ async def on_text(message: Message) -> None:
         return
     renderer = Renderer(chat_id, sid)
     renderers[sid] = renderer
-    body: dict = {"model": MODEL, "parts": [{"type": "text", "text": message.text}]}
+    body: dict = {"model": MODEL, "agent": AGENT, "parts": [{"type": "text", "text": message.text}]}
     variant = chats.get(chat_id, {}).get("variant")
     if variant:
         body["variant"] = variant

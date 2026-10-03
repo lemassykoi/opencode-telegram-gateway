@@ -42,6 +42,7 @@ Telegram <-> aiogram bot (allowlist, streaming edits, /stop relay)
 | Topic      | Choice                                                        |
 |------------|---------------------------------------------------------------|
 | Model      | `flashnext/qwen3.8-flash-next` (local SGLang), set per message; `/model` later |
+| Agent      | every prompt sends `agent: "ask"` — the full-tool primary agent; the machine's `default_agent` is `plan`, which refuses edits |
 | Working dir| `/home/clement` (project root; loads `AGENTS.md`)              |
 | Permission | Relay asks to Telegram (yes/no buttons), never auto-approve    |
 | Access     | Telegram user-ID allowlist is the only security boundary; server stays on localhost |
@@ -50,7 +51,8 @@ Telegram <-> aiogram bot (allowlist, streaming edits, /stop relay)
 ## Server API surface used (opencode 1.18.34, `/doc` for full OpenAPI)
 
 - `POST /session`, `DELETE /session/:id`, `POST /session/:id/abort`
-- `POST /session/:id/prompt_async` (body: `model`, `parts`)
+- `POST /session/:id/prompt_async` (body: `model`, `agent`, `parts`,
+  optional `variant`)
 - `GET /event` (SSE bus events: message/part/permission/status)
 - `POST /session/:id/permissions/:permissionID` (body: `response`)
 
