@@ -35,6 +35,9 @@ log = logging.getLogger("otg")
 OPENCODE_URL = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4097")
 MODEL = {"providerID": "flashnext", "modelID": "qwen3.8-flash-next"}
 AGENT = os.environ.get("OTG_AGENT", "ask")
+INTERNAL_AGENTS = {"compaction", "summary", "title"}
+STATIC_AGENTS: dict[str, dict | None] = {"ask": None, "build": None, "plan": None}
+agents_cache: dict[str, dict | None] = {}  # name -> agent model dict or None (uses global model)
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(",", " ").split()}
 STATE_FILE = BASE_DIR / "state.json"
@@ -51,7 +54,7 @@ COPY = {
     "en": {
         "welcome": "Hi{name}! I'm Ask — your opencode gateway. Every message runs as "
         "an agent on this machine; any tool use asks you first.\n"
-        "Commands: /stop /reset /session /variant /id",
+        "Commands: /stop /reset /session /variant /agent /id",
         "pick_lang": "🌐 Choose your language / Choisis ta langue :",
         "menu_label": "Commands:",
         "need_start": "👋 Send /start to begin.",
@@ -59,6 +62,9 @@ COPY = {
         "variant_usage": "current variant: {cur}\nusage: /variant default|{opts}",
         "variant_set": "variant set: {val}",
         "variant_unknown": "unknown variant: {val}\nuse default|{opts}",
+        "agent_usage": "current agent: {cur}\nusage: /agent {opts}",
+        "agent_set": "agent set: {val}",
+        "agent_unknown": "unknown agent: {val}\nuse: {opts}",
         "your_id": "your telegram user id: {id}",
         "session": "session: {sid}",
         "session_none": "session: (none yet — send a message first)",
@@ -71,7 +77,7 @@ COPY = {
     "fr": {
         "welcome": "Salut{name}! Je suis Ask — ta passerelle opencode. Chaque message "
         "lance un agent sur cette machine ; toute utilisation d'outil te demande "
-        "d'abord.\nCommandes : /stop /reset /session /variant /id",
+        "d'abord.\nCommandes : /stop /reset /session /variant /agent /id",
         "pick_lang": "🌐 Choose your language / Choisis ta langue :",
         "menu_label": "Commandes :",
         "need_start": "👋 Envoie /start pour commencer.",
@@ -79,6 +85,9 @@ COPY = {
         "variant_usage": "variante actuelle : {cur}\nusage : /variant default|{opts}",
         "variant_set": "variante définie : {val}",
         "variant_unknown": "variante inconnue : {val}\nchoix : default|{opts}",
+        "agent_usage": "agent actuel : {cur}\nusage : /agent {opts}",
+        "agent_set": "agent défini : {val}",
+        "agent_unknown": "agent inconnu : {val}\nchoix : {opts}",
         "your_id": "ton id utilisateur Telegram : {id}",
         "session": "session : {sid}",
         "session_none": "session : (aucune pour l'instant — envoie d'abord un message)",
@@ -93,7 +102,7 @@ MENU = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="/stop"), KeyboardButton(text="/reset")],
         [KeyboardButton(text="/session"), KeyboardButton(text="/variant")],
-        [KeyboardButton(text="/id")],
+        [KeyboardButton(text="/agent"), KeyboardButton(text="/id")],
     ],
     resize_keyboard=True,
     persistent=True,
@@ -119,6 +128,7 @@ def load_state() -> None:
         v.setdefault("started", True)  # chats predating the /start gate stay open
         v.setdefault("variant", None)
         v.setdefault("lang", None)
+        v.setdefault("agent", None)
         chats[int(k)] = v
 
 
@@ -132,6 +142,37 @@ def meta_of(chat_id: int) -> dict:
 
 def L(chat_id: int) -> dict:
     return COPY.get((chats.get(chat_id) or {}).get("lang") or "en", COPY["en"])
+
+
+async def fetch_agents() -> dict[str, dict | None]:
+    """Primary agents offered by /agent; name -> model dict (or None = global model)."""
+    global agents_cache
+    try:
+        async with http.get(f"{OPENCODE_URL}/agent", timeout=API_TIMEOUT) as r:
+            r.raise_for_status()
+            data = await r.json()
+        found = {
+            a["name"]: a.get("model")
+            for a in data
+            if a.get("mode") == "primary"
+            and a.get("name") not in INTERNAL_AGENTS
+            and a.get("model") is None  # agents with their own model (e.g. Hacker -> llama.cpp)
+            # are not offered: only the SGLang engine is loaded; prompt would fail
+        }
+        if found:
+            agents_cache = found
+    except Exception:
+        log.warning("GET /agent failed; keeping previous list")
+    return agents_cache or dict(STATIC_AGENTS)
+
+
+def build_prompt_body(agent: str, text: str, variant: str | None) -> dict:
+    body: dict = {"agent": agent, "parts": [{"type": "text", "text": text}]}
+    if not agents_cache.get(agent):  # agent has no own model -> pin ours
+        body["model"] = MODEL
+        if variant:
+            body["variant"] = variant
+    return body
 
 
 def split_tg(text: str) -> list[str]:
@@ -574,6 +615,25 @@ async def cmd_variant(message: Message) -> None:
     await message.answer(c["variant_set"].format(val=meta["variant"] or "default"))
 
 
+@dp.message(Command("agent"))
+async def cmd_agent(message: Message) -> None:
+    meta, c = meta_of(message.chat.id), L(message.chat.id)
+    agents = await fetch_agents()
+    args = (message.text or "").split(maxsplit=1)
+    cur = meta.get("agent") or AGENT
+    if len(args) < 2:
+        await message.answer(c["agent_usage"].format(cur=cur, opts=" | ".join(agents)))
+        return
+    want = args[1].strip()
+    match = next((n for n in agents if n.lower() == want.lower()), None)
+    if match is None:
+        await message.answer(c["agent_unknown"].format(val=want, opts=" | ".join(agents)))
+        return
+    meta["agent"] = match
+    save_state()
+    await message.answer(c["agent_set"].format(val=match))
+
+
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
     sid = meta_of(message.chat.id).pop("session_id", None)
@@ -635,10 +695,10 @@ async def on_text(message: Message) -> None:
         return
     renderer = Renderer(chat_id, sid)
     renderers[sid] = renderer
-    body: dict = {"model": MODEL, "agent": AGENT, "parts": [{"type": "text", "text": message.text}]}
-    variant = chats.get(chat_id, {}).get("variant")
-    if variant:
-        body["variant"] = variant
+    if not agents_cache:
+        await fetch_agents()
+    meta = chats.get(chat_id, {})
+    body = build_prompt_body(meta.get("agent") or AGENT, message.text, meta.get("variant"))
     try:
         async with http.post(
             f"{OPENCODE_URL}/session/{sid}/prompt_async",
@@ -658,6 +718,7 @@ async def main() -> None:
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=15))
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
+    await fetch_agents()
     sse = asyncio.create_task(sse_loop())
     log.info("Ask starting: model=%s allowed=%d chats=%d", MODEL["modelID"], len(ALLOWED), len(chats))
     try:

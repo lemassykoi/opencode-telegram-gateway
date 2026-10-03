@@ -42,7 +42,7 @@ Telegram <-> aiogram bot (allowlist, streaming edits, /stop relay)
 | Topic      | Choice                                                        |
 |------------|---------------------------------------------------------------|
 | Model      | `flashnext/qwen3.8-flash-next` (local SGLang), set per message; `/model` later |
-| Agent      | every prompt sends `agent: "ask"` — the full-tool primary agent; the machine's `default_agent` is `plan`, which refuses edits |
+| Agent      | per-chat via `/agent` (default `ask`, the full-tool agent; the machine's `default_agent` is `plan`). Only global-model agents are offered — `Hacker` swaps to llama.cpp which is not loaded |
 | Working dir| `/home/clement` (project root; loads `AGENTS.md`)              |
 | Permission | Relay asks to Telegram (yes/no buttons), never auto-approve    |
 | Access     | Telegram user-ID allowlist is the only security boundary; server stays on localhost |
@@ -98,6 +98,9 @@ under current config (relay path still required for safety).
       fallback), per-turn metrics message
 - [x] Every prompt pins `agent: "ask"` — machine `default_agent: plan`
       had the model replying "I'm in Plan mode"
+- [x] `/agent` command — per-chat switch among global-model agents
+      (`ask` default, `build`, `plan`); own-model agents (`Hacker` ->
+      llama.cpp) are hidden because only the SGLang engine is loaded
 
 ## Next steps
 
@@ -108,8 +111,6 @@ under current config (relay path still required for safety).
       abandons the in-flight Telegram placeholder)
 - [ ] `/model` command — list models from `/provider`, store per chat
       like `variant`
-- [ ] `/agent` command — per-chat agent switch (`ask` default; `Hacker`
-      runs Cyber-Tiel with bash always asking — relay covers it)
 - [ ] Queue one follow-up message while a turn is running instead of
       the "still working" decline
 
@@ -126,9 +127,9 @@ journalctl --user -u otg -n 50 --no-pager
   Only one getUpdates consumer per token — `hermes-gateway.service`
   must stay disabled.
 - `state.json` (gitignored): chat_id -> `{session_id, started, variant,
-  lang}` (legacy flat `chat_id -> session_id` maps migrate on load,
-  keeping those chats started); delete or edit to re-map chats; stale
-  sessions are auto-recreated on next message.
+  lang, agent}` (legacy flat `chat_id -> session_id` maps migrate on
+  load, keeping those chats started); delete or edit to re-map chats;
+  stale sessions are auto-recreated on next message.
 - Model/provider comes from `~/.config/opencode/opencode.json`
   (`flashnext` = SGLang on 127.0.0.1:30001, key via file). The SGLang
   engine runs as the `qwen38-flash` docker container.
