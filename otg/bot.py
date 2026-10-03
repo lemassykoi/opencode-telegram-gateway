@@ -42,6 +42,8 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(",", " ").split()}
 STATE_FILE = BASE_DIR / "state.json"
 EDIT_INTERVAL = 2.0
+SPINNER = ("⏳", "⌛")
+SPIN_INTERVAL = 3.0
 TG_LIMIT = 4096
 API_TIMEOUT = aiohttp.ClientTimeout(total=30)
 VARIANTS = ("lean", "low", "medium", "xhigh")
@@ -256,6 +258,10 @@ class Renderer:
         self.last_edit = 0.0
         self.html_ok = True
         self.first_delta = 0.0
+        self.spinner: asyncio.Task | None = None
+        self.spin_stopped = False
+        self.spin_frame = 0
+        self.has_content = False
         self.m_msgs: dict[str, tuple[int, float]] = {}  # msg_id -> (out+reasoning tokens, cost)
         self.m_model = MODEL["modelID"]
 
@@ -267,6 +273,31 @@ class Renderer:
         self.notes.clear()
         self.first_delta = 0.0
         self.m_msgs.clear()
+        self.has_content = False
+
+    async def show_placeholder(self) -> None:
+        await self._put(SPINNER[0])
+
+    def start_spinner(self) -> None:
+        self.spinner = asyncio.ensure_future(self._spin())
+
+    async def _spin(self) -> None:
+        try:
+            while not self.spin_stopped:
+                await asyncio.sleep(SPIN_INTERVAL)
+                if self.has_content or self.spin_stopped:
+                    return
+                self.spin_frame += 1
+                await self._put(SPINNER[self.spin_frame % len(SPINNER)])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.debug("spinner stopped", exc_info=True)
+
+    def stop_spinner(self) -> None:
+        self.spin_stopped = True
+        if self.spinner and not self.spinner.done():
+            self.spinner.cancel()
 
     def on_part(self, part: dict) -> None:
         pid = part["id"]
@@ -347,12 +378,18 @@ class Renderer:
                 log.debug("render: %s", exc)
 
     async def render(self) -> None:
+        text = self.build_text()
+        if not text:
+            return
+        self.has_content = True
+        self.stop_spinner()
         if time.monotonic() - self.last_edit < EDIT_INTERVAL:
             return
         self.last_edit = time.monotonic()
-        await self._put(self.build_text()[:TG_LIMIT] or "…")
+        await self._put(text[:TG_LIMIT])
 
     async def finalize(self, note: str = "") -> None:
+        self.stop_spinner()
         if note:
             self.notes.append(note)
         chunks = split_tg(self.build_text()) or ["(empty)"]
@@ -638,7 +675,9 @@ async def cmd_agent(message: Message) -> None:
 async def cmd_reset(message: Message) -> None:
     sid = meta_of(message.chat.id).pop("session_id", None)
     if sid:
-        renderers.pop(sid, None)
+        dropped = renderers.pop(sid, None)
+        if dropped:
+            dropped.stop_spinner()
         try:
             async with http.delete(f"{OPENCODE_URL}/session/{sid}", timeout=API_TIMEOUT) as r:
                 pass
@@ -695,6 +734,8 @@ async def on_text(message: Message) -> None:
         return
     renderer = Renderer(chat_id, sid)
     renderers[sid] = renderer
+    await renderer.show_placeholder()
+    renderer.start_spinner()
     if not agents_cache:
         await fetch_agents()
     meta = chats.get(chat_id, {})
@@ -708,7 +749,13 @@ async def on_text(message: Message) -> None:
             if r.status not in (200, 204):
                 raise RuntimeError(f"prompt_async {r.status}: {(await r.text())[:200]}")
     except Exception as exc:
+        renderer.stop_spinner()
         renderers.pop(sid, None)
+        if renderer.msg_id:
+            try:
+                await bot.delete_message(chat_id, renderer.msg_id)
+            except Exception:
+                pass
         await message.answer(f"⚠️ {exc}")
 
 
