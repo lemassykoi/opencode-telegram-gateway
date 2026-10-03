@@ -91,35 +91,27 @@ under current config (relay path still required for safety).
 - [x] Retire `~/qwen-tgbot` (process killed incl. stray respawn, dir
       deleted, live parity verified 2026-10-02: streaming, tool status,
       permission buttons)
+- [x] UX batch (2026-10-02/03): first-name welcome + `/start` gate,
+      `/variant`, `/session` (`/id` = Telegram id), pretty session
+      titles, custom deny message, EN/FR language with inline buttons,
+      reply-keyboard menu, HTML output formatting (plain-markdown
+      fallback), per-turn metrics message
+- [x] Every prompt pins `agent: "ask"` — machine `default_agent: plan`
+      had the model replying "I'm in Plan mode"
 
-## Next steps (new thread)
+## Next steps
 
-- [x] Welcome message at `/start` includes the user's first name
-- [x] Gate: deny chatting until `/start` has been sent (tracked in
-      state.json; legacy chats auto-migrated as started)
-- [x] Variant switching (`/variant default|lean|low|medium|xhigh`) —
-      stored per chat in state.json, passed to `prompt_async` as
-      `variant` (verified accepted: 204)
-- [x] `/session` command printing the session_id so the owner can resume
-      the conversation from the desktop; `/id` now returns the Telegram
-      user id
-- [x] Pretty session titles: "Telegram Session from Clement (@username)
-      YYYY-MM-DD" built from `from_user` at session creation
-- [x] Custom message for rejected (non-allowlisted) users (one-time,
-      includes their id)
-- [x] Language setting (French / English): `/start` offers 🇫🇷/🇬🇧 inline
-      buttons (or `/start fr|en`); stored in state.json, all bot replies
-      and the permission prompt localized from `COPY`
-- [x] Reply-keyboard "Menu" button grouping all commands — attached
-      after the welcome (persistent, resize; buttons send the plain
-      commands)
-- [x] Output formatting for Telegram: **HTML** chosen (simplest escaping) —
-      `md_to_html()` converts fenced/inline code, bold, italic, strike,
-      headings, links; falls back to plain markdown on parse errors or
-      over-long HTML and disables HTML for that renderer
-- [x] Per-turn metrics as a separate message after each turn: model,
-      wall time (first delta -> idle), output tokens + tok/s, cost —
-      summed over all assistant messages of the turn
+- [ ] Owner smoke pass of the UX batch in Telegram (HTML rendering,
+      metrics line, FR/EN buttons, menu keyboard)
+- [ ] Survive restarts mid-turn: on boot, seed renderers for sessions
+      that are busy per `/session/status` (today the restarted bot
+      abandons the in-flight Telegram placeholder)
+- [ ] `/model` command — list models from `/provider`, store per chat
+      like `variant`
+- [ ] `/agent` command — per-chat agent switch (`ask` default; `Hacker`
+      runs Cyber-Tiel with bash always asking — relay covers it)
+- [ ] Queue one follow-up message while a turn is running instead of
+      the "still working" decline
 
 ## Operations
 
