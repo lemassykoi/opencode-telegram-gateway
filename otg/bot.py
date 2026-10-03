@@ -20,6 +20,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -42,8 +43,7 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(",", " ").split()}
 STATE_FILE = BASE_DIR / "state.json"
 EDIT_INTERVAL = 2.0
-SPINNER = ("⏳", "⌛")
-SPIN_INTERVAL = 3.0
+WAIT_EMOJI = "⏳"  # lone-emoji message: Telegram shows it jumbo and animates it
 TG_LIMIT = 4096
 API_TIMEOUT = aiohttp.ClientTimeout(total=30)
 VARIANTS = ("lean", "low", "medium", "xhigh")
@@ -109,6 +109,26 @@ MENU = ReplyKeyboardMarkup(
     resize_keyboard=True,
     persistent=True,
 )
+COMMANDS = {
+    "en": [
+        BotCommand(command="start", description="Start / choose language"),
+        BotCommand(command="stop", description="Abort current turn"),
+        BotCommand(command="reset", description="New session"),
+        BotCommand(command="session", description="Show opencode session id"),
+        BotCommand(command="variant", description="Set reasoning effort"),
+        BotCommand(command="agent", description="Switch agent"),
+        BotCommand(command="id", description="Show your Telegram id"),
+    ],
+    "fr": [
+        BotCommand(command="start", description="Démarrer / choisir la langue"),
+        BotCommand(command="stop", description="Interrompre le tour en cours"),
+        BotCommand(command="reset", description="Nouvelle session"),
+        BotCommand(command="session", description="Afficher l'id de session opencode"),
+        BotCommand(command="variant", description="Régler l'effort de raisonnement"),
+        BotCommand(command="agent", description="Changer d'agent"),
+        BotCommand(command="id", description="Afficher votre id Telegram"),
+    ],
+}
 
 bot: Bot
 http: aiohttp.ClientSession
@@ -258,10 +278,6 @@ class Renderer:
         self.last_edit = 0.0
         self.html_ok = True
         self.first_delta = 0.0
-        self.spinner: asyncio.Task | None = None
-        self.spin_stopped = False
-        self.spin_frame = 0
-        self.has_content = False
         self.m_msgs: dict[str, tuple[int, float]] = {}  # msg_id -> (out+reasoning tokens, cost)
         self.m_model = MODEL["modelID"]
 
@@ -273,31 +289,9 @@ class Renderer:
         self.notes.clear()
         self.first_delta = 0.0
         self.m_msgs.clear()
-        self.has_content = False
 
     async def show_placeholder(self) -> None:
-        await self._put(SPINNER[0])
-
-    def start_spinner(self) -> None:
-        self.spinner = asyncio.ensure_future(self._spin())
-
-    async def _spin(self) -> None:
-        try:
-            while not self.spin_stopped:
-                await asyncio.sleep(SPIN_INTERVAL)
-                if self.has_content or self.spin_stopped:
-                    return
-                self.spin_frame += 1
-                await self._put(SPINNER[self.spin_frame % len(SPINNER)])
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.debug("spinner stopped", exc_info=True)
-
-    def stop_spinner(self) -> None:
-        self.spin_stopped = True
-        if self.spinner and not self.spinner.done():
-            self.spinner.cancel()
+        await self._put(WAIT_EMOJI)
 
     def on_part(self, part: dict) -> None:
         pid = part["id"]
@@ -381,15 +375,12 @@ class Renderer:
         text = self.build_text()
         if not text:
             return
-        self.has_content = True
-        self.stop_spinner()
         if time.monotonic() - self.last_edit < EDIT_INTERVAL:
             return
         self.last_edit = time.monotonic()
         await self._put(text[:TG_LIMIT])
 
     async def finalize(self, note: str = "") -> None:
-        self.stop_spinner()
         if note:
             self.notes.append(note)
         chunks = split_tg(self.build_text()) or ["(empty)"]
@@ -675,9 +666,7 @@ async def cmd_agent(message: Message) -> None:
 async def cmd_reset(message: Message) -> None:
     sid = meta_of(message.chat.id).pop("session_id", None)
     if sid:
-        dropped = renderers.pop(sid, None)
-        if dropped:
-            dropped.stop_spinner()
+        renderers.pop(sid, None)
         try:
             async with http.delete(f"{OPENCODE_URL}/session/{sid}", timeout=API_TIMEOUT) as r:
                 pass
@@ -735,7 +724,6 @@ async def on_text(message: Message) -> None:
     renderer = Renderer(chat_id, sid)
     renderers[sid] = renderer
     await renderer.show_placeholder()
-    renderer.start_spinner()
     if not agents_cache:
         await fetch_agents()
     meta = chats.get(chat_id, {})
@@ -749,7 +737,6 @@ async def on_text(message: Message) -> None:
             if r.status not in (200, 204):
                 raise RuntimeError(f"prompt_async {r.status}: {(await r.text())[:200]}")
     except Exception as exc:
-        renderer.stop_spinner()
         renderers.pop(sid, None)
         if renderer.msg_id:
             try:
@@ -765,6 +752,11 @@ async def main() -> None:
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=15))
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
+    try:
+        await bot.set_my_commands(COMMANDS["en"])
+        await bot.set_my_commands(COMMANDS["fr"], language_code="fr")
+    except Exception:
+        log.warning("could not update Telegram command menu")
     await fetch_agents()
     sse = asyncio.create_task(sse_loop())
     log.info("Ask starting: model=%s allowed=%d chats=%d", MODEL["modelID"], len(ALLOWED), len(chats))

@@ -96,6 +96,12 @@ under current config (relay path still required for safety).
       titles, custom deny message, EN/FR language with inline buttons,
       reply-keyboard menu, HTML output formatting (plain-markdown
       fallback), per-turn metrics message
+- [x] Wait placeholder: single ⏳ message (lone emoji = jumbo + native
+      animation on Telegram; no edit loop needed), replaced by the
+      streamed answer as soon as content arrives
+- [x] Bot command menu registered via `set_my_commands` (EN default +
+      FR) at every boot — cleared 57 stale Hermes-era commands that the
+      "Menu" button still showed (same bot token as the prototype)
 - [x] Every prompt pins `agent: "ask"` — machine `default_agent: plan`
       had the model replying "I'm in Plan mode"
 - [x] `/agent` command — per-chat switch among global-model agents
