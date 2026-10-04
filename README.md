@@ -107,6 +107,13 @@ under current config (relay path still required for safety).
 - [x] `/agent` command — per-chat switch among global-model agents
       (`ask` default, `build`, `plan`); own-model agents (`Hacker` ->
       llama.cpp) are hidden because only the SGLang engine is loaded
+- [x] Voicebox TTS voice notes (2026-10-04): `voicebox` MCP registered
+      in the global opencode config (Bearer token in
+      `~/.config/voicebox/api-key`, endpoint `10.0.0.135:8000/voicebox/mcp`).
+      opencode 1.18.34 drops MCP `audio` result blocks, so the bot relays
+      the audio itself: `download_url` from the tool result -> WAV ->
+      ffmpeg OGG/Opus -> `send_voice` (document fallback), deduped per
+      generation_id across resyncs. Verified end-to-end in Telegram
 
 ## Next steps
 
