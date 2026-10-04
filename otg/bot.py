@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -22,6 +23,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -47,6 +49,8 @@ WAIT_EMOJI = "⏳"  # lone-emoji message: Telegram shows it jumbo and animates i
 TG_LIMIT = 4096
 API_TIMEOUT = aiohttp.ClientTimeout(total=30)
 VARIANTS = ("lean", "low", "medium", "xhigh")
+VOICE_TOOLS = ("voicebox_generate", "voicebox_get_audio")  # opencode drops MCP audio blocks; we relay it
+AUDIO_TIMEOUT = aiohttp.ClientTimeout(total=120)
 DENY_MSG = (
     "⛔ Sorry — Ask is a private gateway and you're not on its allowlist.\n"
     "Your Telegram user id: {id}\n"
@@ -138,6 +142,15 @@ renderers: dict[str, "Renderer"] = {}  # session_id -> active renderer
 roles: dict[str, str] = {}  # opencode message_id -> role
 perm_msgs: dict[str, tuple[int, int]] = {}  # permission_id -> (chat_id, tg_message_id)
 unknown_notified: set[int] = set()
+sent_audio: set[str] = set()  # voicebox generation_ids already delivered to Telegram
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
 
 
 def load_state() -> None:
@@ -263,6 +276,43 @@ async def tg_edit(chat_id: int, msg_id: int, text: str, html: bool = True) -> No
     await bot.edit_message_text(text=text[:TG_LIMIT], chat_id=chat_id, message_id=msg_id, parse_mode=None)
 
 
+async def send_voice_note(chat_id: int, url: str) -> None:
+    """Fetch a voicebox WAV and deliver it as a Telegram voice note (OGG/Opus)."""
+    async with http.get(url, timeout=AUDIO_TIMEOUT) as r:
+        r.raise_for_status()
+        mime = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        payload = await r.read()
+    if not mime.startswith("audio/") and payload[:4] != b"RIFF":
+        raise RuntimeError(f"unexpected audio payload from {url} (content-type {mime!r})")
+    with tempfile.TemporaryDirectory() as td:
+        src, dst = Path(td) / "audio.in", Path(td) / "voice.ogg"
+        src.write_bytes(payload)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-loglevel", "error", "-i", str(src),
+            "-c:a", "libopus", "-b:a", "32k", "-ar", "48000", "-ac", "1",
+            "-y", str(dst),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode == 0 and dst.is_file() and dst.stat().st_size > 0:
+            await bot.send_voice(chat_id, FSInputFile(str(dst)))
+        else:
+            log.warning("ffmpeg voice convert failed: %.200s", err.decode(errors="replace"))
+            await bot.send_document(chat_id, FSInputFile(str(src)))
+
+
+async def drain_audio(renderer: "Renderer") -> None:
+    while renderer.pending_audio:
+        gid, url = renderer.pending_audio.pop(0)
+        if gid in sent_audio:
+            continue
+        sent_audio.add(gid)
+        try:
+            await send_voice_note(renderer.chat_id, url)
+        except Exception as exc:
+            log.warning("voice relay failed (gen %s): %s", gid, exc)
+
+
 class Renderer:
     """Accumulates one turn of assistant output and edits it into one TG message."""
 
@@ -273,6 +323,7 @@ class Renderer:
         self.done_tools: set[str] = set()
         self.tool_lines: list[str] = []
         self.running_tools: dict[str, str] = {}  # call_id -> tool name
+        self.pending_audio: list[tuple[str, str]] = []  # (generation_id, download_url)
         self.notes: list[str] = []
         self.msg_id: int | None = None
         self.last_edit = 0.0
@@ -286,6 +337,7 @@ class Renderer:
         self.done_tools.clear()
         self.tool_lines.clear()
         self.running_tools.clear()
+        self.pending_audio.clear()
         self.notes.clear()
         self.first_delta = 0.0
         self.m_msgs.clear()
@@ -311,6 +363,19 @@ class Renderer:
                 self.running_tools.pop(call, None)
                 self.done_tools.add(call)
                 self.tool_lines.append(f"🔧 {name}" + (" ⚠️" if status == "error" else ""))
+                if name in VOICE_TOOLS:
+                    self._queue_audio(part)
+
+    def _queue_audio(self, part: dict) -> None:
+        try:
+            data = json.loads((part.get("state") or {}).get("output") or "")
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(data, dict):
+            return
+        gid, url = data.get("generation_id"), data.get("download_url")
+        if gid and url and gid not in sent_audio:
+            self.pending_audio.append((gid, url))
 
     def on_delta(self, props: dict) -> None:
         slot = self.parts.get(props["partID"])
@@ -451,6 +516,8 @@ async def handle_event(ev: dict) -> None:
         if renderer and roles.get(part.get("messageID", "")) == "assistant":
             renderer.on_part(part)
             await renderer.render()
+            if renderer.pending_audio:
+                _spawn(drain_audio(renderer))
     elif etype == "message.part.delta":
         if renderer and roles.get(props.get("messageID", "")) == "assistant":
             renderer.on_delta(props)
@@ -522,6 +589,8 @@ async def resync() -> None:
             if info.get("role") == "assistant":
                 for part in item.get("parts", []):
                     renderer.on_part(part)
+        if renderer.pending_audio:
+            _spawn(drain_audio(renderer))
         if statuses.get(sid, {}).get("type", "idle") == "idle":
             renderers.pop(sid, None)
             await renderer.finalize()
