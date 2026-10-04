@@ -49,7 +49,7 @@ WAIT_EMOJI = "⏳"  # lone-emoji message: Telegram shows it jumbo and animates i
 TG_LIMIT = 4096
 API_TIMEOUT = aiohttp.ClientTimeout(total=30)
 VARIANTS = ("lean", "low", "medium", "xhigh")
-VOICE_TOOLS = ("voicebox_generate", "voicebox_get_audio")  # opencode drops MCP audio blocks; we relay it
+VOICE_TOOLS = ("voicebox_generate", "voicebox_get_audio")  # opencode prefixes MCP tools with <server>_
 AUDIO_TIMEOUT = aiohttp.ClientTimeout(total=120)
 DENY_MSG = (
     "⛔ Sorry — Ask is a private gateway and you're not on its allowlist.\n"
@@ -363,7 +363,7 @@ class Renderer:
                 self.running_tools.pop(call, None)
                 self.done_tools.add(call)
                 self.tool_lines.append(f"🔧 {name}" + (" ⚠️" if status == "error" else ""))
-                if name in VOICE_TOOLS:
+                if name.endswith(VOICE_TOOLS):
                     self._queue_audio(part)
 
     def _queue_audio(self, part: dict) -> None:
@@ -515,9 +515,9 @@ async def handle_event(ev: dict) -> None:
         part = props.get("part", {})
         if renderer and roles.get(part.get("messageID", "")) == "assistant":
             renderer.on_part(part)
-            await renderer.render()
             if renderer.pending_audio:
                 _spawn(drain_audio(renderer))
+            await renderer.render()
     elif etype == "message.part.delta":
         if renderer and roles.get(props.get("messageID", "")) == "assistant":
             renderer.on_delta(props)
