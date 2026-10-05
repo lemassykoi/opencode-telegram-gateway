@@ -1,164 +1,124 @@
 # Opencode Telegram Gateway (OTG)
 
-Telegram bot that proxies chats to **opencode sessions** running on this
-ThinkStation PGX. The bot is a thin, allowlisted bridge; opencode is the
-agent brain — real tools (bash, edit, read), MCP servers, AGENTS.md machine
-context, and thus real-world awareness (dates, system state, services).
+A Telegram bot that turns [opencode](https://opencode.ai) into your
+personal assistant: message the bot, and your words run as a real agent
+session on this machine — full tools (bash, file edit, MCP servers),
+machine context via `AGENTS.md`, and real-world awareness (dates,
+services, system state). OTG itself is a thin, allowlisted bridge: the
+aiogram layer plus the Telegram user-ID allowlist. opencode is the brain.
 
 ## Why
 
-A hand-rolled "LLM + MCP tools" Telegram bot (the `~/qwen-tgbot` prototype)
-re-implements badly what opencode already provides: tool loops, permissions,
-session persistence, context files. OTG replaces the prototype's brain with
-`opencode serve`'s HTTP API and keeps only the parts worth owning: the
-aiogram layer and the Telegram user allowlist.
+A hand-rolled "LLM + tools" Telegram bot re-implements badly what
+opencode already provides: tool loops, permissions, session persistence,
+context files. OTG keeps only what's worth owning — the Telegram side —
+and delegates everything else to `opencode serve`'s HTTP API.
+
+## What it does
+
+- **One opencode session per Telegram chat** — conversation state
+  persists across messages; `/reset` starts fresh.
+- **Live streaming** — the reply is edited into a single Telegram
+  message as it streams (throttled to Telegram's flood limits), with a
+  jumbo ⏳ placeholder while waiting and tool activity shown as a status
+  header (`🔧 tool`, `⚙️ running…`).
+- **Permission relay** — whenever the agent wants to run a tool, you get
+  inline **✅ Yes / ❌ No** buttons in Telegram. Nothing is ever
+  auto-approved.
+- **Per-user memory** — a 32 KB markdown notepad per Telegram user
+  (`memory/<user_id>.md`). Each prompt carries a one-line pointer to it;
+  the agent reads and updates it with its own tools when you ask it to
+  remember something or reveal durable personal facts, compacting it in
+  place near the cap.
+- **Voice notes** — if the agent calls the voicebox TTS MCP tool, the
+  audio is converted (ffmpeg → OGG/Opus) and delivered as a real
+  Telegram voice message.
+- **Mid-turn restarts** — if the bot restarts while a turn is running,
+  it re-adopts the busy session and keeps streaming.
+- **Follow-up queue** — send a message while the bot is working and it
+  is queued (one slot) and runs as soon as the current turn finishes.
+- **UX niceties** — EN/FR interface, HTML formatting (code blocks,
+  bold, links) with plain-text fallback, per-turn metrics line (model,
+  wall time, tokens/s, cost), `/stop` `/reset` `/session` `/variant`
+  `/agent` `/id` commands.
 
 ## Architecture
 
 ```
-Telegram <-> aiogram bot (allowlist, streaming edits, /stop relay)
+Telegram <-> aiogram bot (allowlist, streaming edits, permission relay)
               |  HTTP 127.0.0.1 only
               v
-        opencode serve  --port 4097 --hostname 127.0.0.1
+        opencode serve --port 4097 --hostname 127.0.0.1
               v
         opencode sessions in the user's home dir (AGENTS.md loaded)
 ```
 
-- One opencode session per Telegram chat, mapped in a small JSON state file.
-- Per-user memory: `memory/<telegram_user_id>.md` (32KB cap, gitignored).
-  Each prompt carries a one-line pointer to the file; the agent reads and
-  updates it with its own tools when the user asks to remember something or
-  reveals durable personal facts, compacting in place near the cap. The bot
-  flags over-cap files after the turn.
-- User message  -> `POST /session/:id/prompt_async`
-- Stream        -> `GET /event` (SSE): assistant text deltas are edited into
-  one Telegram message (throttled); tool activity shown as a status header.
-- `/stop`       -> `POST /session/:id/abort`
-- `/reset`      -> `DELETE /session/:id` + create fresh
-- Permission asks (`permission.asked` events) are **relayed to Telegram**
-  as inline yes/no buttons -> `POST /session/:id/permissions/:permissionID`
-  with `{"response": "once"|"reject"}` (never `always`).
-- Streaming: `message.part.delta` deltas (field `text`) accumulated per
-  part; `message.part.updated` snapshots are authoritative; `session.idle`
+- User message → `POST /session/:id/prompt_async`
+- Stream → `GET /event` SSE: `message.part.delta` text deltas are
+  accumulated per part and edited into one message; `session.idle`
   finalizes the turn.
+- Permission asks (`permission.asked`) → inline buttons →
+  `POST /session/:id/permissions/:permissionID` (`once`/`reject` only).
+- `/stop` → `POST /session/:id/abort`; `/reset` → delete + recreate.
 
-## Decisions
+## Requirements
 
-| Topic      | Choice                                                        |
-|------------|---------------------------------------------------------------|
-| Model      | `flashnext/qwen3.8-flash-next` (local SGLang), set per message; `/model` later |
-| Agent      | per-chat via `/agent` (default `ask`, the full-tool agent; the machine's `default_agent` is `plan`). Only global-model agents are offered — `Hacker` swaps to llama.cpp which is not loaded |
-| Working dir| user home dir (project root; loads `AGENTS.md`)                |
-| Permission | Relay asks to Telegram (yes/no buttons), never auto-approve    |
-| Access     | Telegram user-ID allowlist is the only security boundary; server stays on localhost |
-| TG lib     | aiogram (long polling), as in the prototype                    |
+- **opencode 1.x** (`opencode serve`). The v2 server API is an
+  intentional breaking change — see
+  [`docs/opencode-v2.md`](docs/opencode-v2.md) for the full compat
+  report. A v2-based rewrite lives in a separate project
+  (`opencode-v2-telegram-gateway`).
+- Python 3.12+ with `aiogram` and `aiohttp` (`pip install -r
+  requirements.txt`).
+- `ffmpeg` on PATH (voice-note conversion only).
+- A model/provider configured in `~/.config/opencode/opencode.json`
+  (this deployment uses a local SGLang endpoint).
 
-## Server API surface used (opencode 1.18.34, `/doc` for full OpenAPI)
+## Setup
 
-- `POST /session`, `DELETE /session/:id`, `POST /session/:id/abort`
-- `POST /session/:id/prompt_async` (body: `model`, `agent`, `parts`,
-  optional `variant`)
-- `GET /event` (SSE bus events: message/part/permission/status)
-- `POST /session/:id/permissions/:permissionID` (body: `response`)
+```bash
+python3 -m venv venv && venv/bin/pip install -r requirements.txt
+cp bot.env.example bot.env        # TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS
+venv/bin/python otg/bot.py        # foreground test run
+```
 
-Verified 2026-10-02: health, session create, sync message with bash tool
-use (model returned real local date), delete, no permission prompt for bash
-under current config (relay path still required for safety).
+For production, install the systemd user units (source of truth in
+`systemd/`, symlinked into `~/.config/systemd/user/`):
 
-## Components (to build)
+```bash
+ln -s "$PWD/systemd/"*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now opencode-serve otg
+```
 
-1. `opencode-serve.service` — systemd user unit running `opencode serve`
-   on 127.0.0.1:4097.
-2. `otg/bot.py` — aiogram bot: allowlist gate, chat->session map,
-   prompt_async, SSE consumer, throttled edits, permission relay buttons,
-   `/start /stop /reset /id` (+ `/model`, `/sessions` later).
-3. `otg.service` — systemd unit; runs after `opencode-serve.service`.
-4. `state.json` — chat_id -> session_id (small JSON, no external store).
+## Configuration
 
-## Security notes
-
-- `opencode serve` unauthenticated on loopback: **never** bind beyond
-  127.0.0.1; set `OPENCODE_SERVER_PASSWORD` if anything else must reach it.
-- Allowlisted Telegram users effectively have shell on this machine. The
-  permission relay (approve each tool ask) is the mitigating control.
-- Do not put any real secrets in chat history files (`state.json`, opencode
-  storage under `~/.local/share/opencode`).
-
-## Status
-
-- [x] Feasibility probe: serve + session + tool-using prompt round-trip
-- [x] Design decisions (model, permissions, working dir)
-- [x] `opencode-serve.service` unit
-- [x] Bot: allowlist + session mapping + prompt/SSE plumbing
-- [x] Permission relay with inline buttons
-- [x] Streaming edit polish (flood limits, 4096 splits)
-- [x] systemd wiring + docs for ops
-- [x] Retire `~/qwen-tgbot` (process killed incl. stray respawn, dir
-      deleted, live parity verified 2026-10-02: streaming, tool status,
-      permission buttons)
-- [x] UX batch (2026-10-02/03): first-name welcome + `/start` gate,
-      `/variant`, `/session` (`/id` = Telegram id), pretty session
-      titles, custom deny message, EN/FR language with inline buttons,
-      reply-keyboard menu, HTML output formatting (plain-markdown
-      fallback), per-turn metrics message
-- [x] Wait placeholder: single ⏳ message (lone emoji = jumbo + native
-      animation on Telegram; no edit loop needed), replaced by the
-      streamed answer as soon as content arrives
-- [x] Bot command menu registered via `set_my_commands` (EN default +
-      FR) at every boot — cleared 57 stale Hermes-era commands that the
-      "Menu" button still showed (same bot token as the prototype)
-- [x] Every prompt pins `agent: "ask"` — machine `default_agent: plan`
-      had the model replying "I'm in Plan mode"
-- [x] `/agent` command — per-chat switch among global-model agents
-      (`ask` default, `build`, `plan`); own-model agents (`Hacker` ->
-      llama.cpp) are hidden because only the SGLang engine is loaded
-- [x] Voicebox TTS voice notes (2026-10-04): `voicebox` MCP registered
-       in the global opencode config (Bearer token in
-       `~/.config/voicebox/api-key`, endpoint `<voicebox-host>:8000/voicebox/mcp`).
-      opencode 1.18.34 drops MCP `audio` result blocks, so the bot relays
-      the audio itself: `download_url` from the tool result -> WAV ->
-      ffmpeg OGG/Opus -> `send_voice` (document fallback), deduped per
-      generation_id across resyncs. Verified end-to-end in Telegram
-- [x] Per-user memory notepad (2026-10-05): `memory/<user_id>.md` (32KB
-      cap), one-line pointer prepended to every prompt; model-managed
-      read/update/compact via its own tools; over-cap warning note after
-      `session.idle`
-
-## Next steps
-
-- [ ] Owner smoke pass of the UX batch in Telegram (HTML rendering,
-      metrics line, FR/EN buttons, menu keyboard)
-- [ ] Survive restarts mid-turn: on boot, seed renderers for sessions
-      that are busy per `/session/status` (today the restarted bot
-      abandons the in-flight Telegram placeholder)
-- [ ] `/model` command — list models from `/provider`, store per chat
-      like `variant`
-- [ ] Queue one follow-up message while a turn is running instead of
-      the "still working" decline
+- `bot.env` (gitignored): `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS`
+  (space/comma-separated Telegram user ids).
+- `state.json` (gitignored): chat_id → `{session_id, started, variant,
+  lang, agent, user_id}`. Delete to re-map chats; stale sessions are
+  auto-recreated on the next message.
+- `memory/` (gitignored): one `<user_id>.md` notepad per user.
+- `OPENCODE_URL` (default `http://127.0.0.1:4097`), `OTG_AGENT`
+  (default `ask`).
 
 ## Operations
 
-```
+```bash
 systemctl --user {status|restart|stop} otg opencode-serve
 journalctl --user -u otg -n 50 --no-pager
 ```
 
-- Files: `systemd/*.service` symlinked into `~/.config/systemd/user/`
-  (edit in repo, then `systemctl --user daemon-reload`).
-- `bot.env` (gitignored): `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS`.
-  Only one getUpdates consumer per token — `hermes-gateway.service`
-  must stay disabled.
-- `state.json` (gitignored): chat_id -> `{session_id, started, variant,
-  lang, agent}` (legacy flat `chat_id -> session_id` maps migrate on
-  load, keeping those chats started); delete or edit to re-map chats;
-  stale sessions are auto-recreated on next message.
-- Model/provider comes from `~/.config/opencode/opencode.json`
-  (`flashnext` = SGLang on 127.0.0.1:30001, key via file). The SGLang
-  engine runs as the `qwen38-flash` docker container.
-- Ops logs use `journalctl --user -u <unit> -n <N> --no-pager` (never bare
-  dumps).
+Only one getUpdates consumer may run per bot token — never run
+`bot.py` manually while `otg.service` is active (TelegramConflictError).
 
-## Relationship to ~/qwen-tgbot
+## Security
 
-Prototype (direct sglang + MCP client loop). Decommissioned 2026-10-02:
-process killed, directory deleted, token now exclusively used by OTG.
+- The Telegram user-ID allowlist is the **only** security boundary:
+  allowlisted users effectively have shell on this machine. The
+  permission relay (approve every tool ask) is the mitigating control.
+- `opencode serve` is unauthenticated on loopback: **never** bind beyond
+  127.0.0.1; set `OPENCODE_SERVER_PASSWORD` if anything else must reach
+  it.
+- Keep secrets out of chat history (`state.json`, opencode storage
+  under `~/.local/share/opencode`, `memory/`).
