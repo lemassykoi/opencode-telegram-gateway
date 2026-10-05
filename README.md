@@ -21,10 +21,15 @@ Telegram <-> aiogram bot (allowlist, streaming edits, /stop relay)
               v
         opencode serve  --port 4097 --hostname 127.0.0.1
               v
-        opencode sessions in /home/clement (AGENTS.md loaded)
+        opencode sessions in the user's home dir (AGENTS.md loaded)
 ```
 
 - One opencode session per Telegram chat, mapped in a small JSON state file.
+- Per-user memory: `memory/<telegram_user_id>.md` (32KB cap, gitignored).
+  Each prompt carries a one-line pointer to the file; the agent reads and
+  updates it with its own tools when the user asks to remember something or
+  reveals durable personal facts, compacting in place near the cap. The bot
+  flags over-cap files after the turn.
 - User message  -> `POST /session/:id/prompt_async`
 - Stream        -> `GET /event` (SSE): assistant text deltas are edited into
   one Telegram message (throttled); tool activity shown as a status header.
@@ -43,7 +48,7 @@ Telegram <-> aiogram bot (allowlist, streaming edits, /stop relay)
 |------------|---------------------------------------------------------------|
 | Model      | `flashnext/qwen3.8-flash-next` (local SGLang), set per message; `/model` later |
 | Agent      | per-chat via `/agent` (default `ask`, the full-tool agent; the machine's `default_agent` is `plan`). Only global-model agents are offered — `Hacker` swaps to llama.cpp which is not loaded |
-| Working dir| `/home/clement` (project root; loads `AGENTS.md`)              |
+| Working dir| user home dir (project root; loads `AGENTS.md`)                |
 | Permission | Relay asks to Telegram (yes/no buttons), never auto-approve    |
 | Access     | Telegram user-ID allowlist is the only security boundary; server stays on localhost |
 | TG lib     | aiogram (long polling), as in the prototype                    |
@@ -108,12 +113,16 @@ under current config (relay path still required for safety).
       (`ask` default, `build`, `plan`); own-model agents (`Hacker` ->
       llama.cpp) are hidden because only the SGLang engine is loaded
 - [x] Voicebox TTS voice notes (2026-10-04): `voicebox` MCP registered
-      in the global opencode config (Bearer token in
-      `~/.config/voicebox/api-key`, endpoint `10.0.0.135:8000/voicebox/mcp`).
+       in the global opencode config (Bearer token in
+       `~/.config/voicebox/api-key`, endpoint `<voicebox-host>:8000/voicebox/mcp`).
       opencode 1.18.34 drops MCP `audio` result blocks, so the bot relays
       the audio itself: `download_url` from the tool result -> WAV ->
       ffmpeg OGG/Opus -> `send_voice` (document fallback), deduped per
       generation_id across resyncs. Verified end-to-end in Telegram
+- [x] Per-user memory notepad (2026-10-05): `memory/<user_id>.md` (32KB
+      cap), one-line pointer prepended to every prompt; model-managed
+      read/update/compact via its own tools; over-cap warning note after
+      `session.idle`
 
 ## Next steps
 

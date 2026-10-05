@@ -44,6 +44,8 @@ agents_cache: dict[str, dict | None] = {}  # name -> agent model dict or None (u
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(",", " ").split()}
 STATE_FILE = BASE_DIR / "state.json"
+MEMORY_DIR = BASE_DIR / "memory"
+MEMORY_LIMIT = 32768
 EDIT_INTERVAL = 2.0
 WAIT_EMOJI = "⏳"  # lone-emoji message: Telegram shows it jumbo and animates it
 TG_LIMIT = 4096
@@ -164,6 +166,7 @@ def load_state() -> None:
         v.setdefault("variant", None)
         v.setdefault("lang", None)
         v.setdefault("agent", None)
+        v.setdefault("user_id", None)
         chats[int(k)] = v
 
 
@@ -177,6 +180,36 @@ def meta_of(chat_id: int) -> dict:
 
 def L(chat_id: int) -> dict:
     return COPY.get((chats.get(chat_id) or {}).get("lang") or "en", COPY["en"])
+
+
+def ensure_memory(user_id: int) -> Path:
+    MEMORY_DIR.mkdir(exist_ok=True)
+    path = MEMORY_DIR / f"{user_id}.md"
+    if not path.is_file():
+        path.write_text(f"# Personal notepad — Telegram user {user_id}\n")
+    return path
+
+
+def memory_prefix(user_id: int) -> str:
+    return (
+        f"[otg] user_id={user_id} personal notepad: {ensure_memory(user_id)} (max 32KB). "
+        "Read it when relevant; update it when the user asks you to remember something or "
+        "reveals durable personal facts (personality, preferences, projects, people); "
+        "compact it in place, preserving key facts, and stay under the cap."
+    )
+
+
+def memory_over_note(chat_id: int) -> str:
+    uid = (chats.get(chat_id) or {}).get("user_id")
+    if not uid:
+        return ""
+    try:
+        size = (MEMORY_DIR / f"{uid}.md").stat().st_size
+    except OSError:
+        return ""
+    if size > MEMORY_LIMIT:
+        return f"⚠️ personal notepad is {size} bytes — over the 32KB cap; compact it now, preserving key facts."
+    return ""
 
 
 async def fetch_agents() -> dict[str, dict | None]:
@@ -541,7 +574,7 @@ async def handle_event(ev: dict) -> None:
     elif etype == "session.idle":
         if renderer:
             renderers.pop(sid, None)
-            await renderer.finalize()
+            await renderer.finalize(memory_over_note(chat_id))
 
 
 async def ask_permission(chat_id: int, props: dict) -> None:
@@ -795,8 +828,13 @@ async def on_text(message: Message) -> None:
     await renderer.show_placeholder()
     if not agents_cache:
         await fetch_agents()
-    meta = chats.get(chat_id, {})
-    body = build_prompt_body(meta.get("agent") or AGENT, message.text, meta.get("variant"))
+    meta = meta_of(chat_id)
+    uid = message.from_user.id if message.from_user else chat_id
+    if meta.get("user_id") != uid:
+        meta["user_id"] = uid
+        save_state()
+    text = f"{memory_prefix(uid)}\n\n{message.text}"
+    body = build_prompt_body(meta.get("agent") or AGENT, text, meta.get("variant"))
     try:
         async with http.post(
             f"{OPENCODE_URL}/session/{sid}/prompt_async",
