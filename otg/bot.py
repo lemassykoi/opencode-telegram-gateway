@@ -36,7 +36,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("otg")
 
 OPENCODE_URL = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4097")
-MODEL = {"providerID": "flashnext", "modelID": "qwen3.8-flash-next"}
+MODEL = {
+    "providerID": os.environ.get("OTG_PROVIDER", "GB_10"),
+    "modelID": os.environ.get("OTG_MODEL", "qwen3.8-flash-next"),
+}
 AGENT = os.environ.get("OTG_AGENT", "ask")
 INTERNAL_AGENTS = {"compaction", "summary", "title"}
 STATIC_AGENTS: dict[str, dict | None] = {"ask": None, "build": None, "plan": None}
@@ -47,6 +50,7 @@ STATE_FILE = BASE_DIR / "state.json"
 MEMORY_DIR = BASE_DIR / "memory"
 MEMORY_LIMIT = 32768
 EDIT_INTERVAL = 2.0
+STALE_AFTER = 1200.0  # s; > this, an unfinished turn is a server-side dead one (engine boot is ~11 min)
 WAIT_EMOJI = "⏳"  # lone-emoji message: Telegram shows it jumbo and animates it
 TG_LIMIT = 4096
 API_TIMEOUT = aiohttp.ClientTimeout(total=30)
@@ -601,8 +605,10 @@ async def ask_permission(chat_id: int, props: dict) -> None:
 
 async def session_busy(sid: str) -> bool:
     """Mid-turn heuristic: last message is an unanswered user msg or an
-    assistant msg without time.completed. (/session/status is {} even
-    during active turns in opencode 1.18.34 — do not trust it.)"""
+    assistant msg without time.completed, created within STALE_AFTER.
+    (/session/status is {} even during active turns in opencode 1.18.34
+    — do not trust it.) A stale unanswered msg means a server-side dead
+    turn (prompt_async died, e.g. bad model id), not a running one."""
     try:
         async with http.get(f"{OPENCODE_URL}/session/{sid}/message", timeout=API_TIMEOUT) as r:
             if r.status != 200:
@@ -613,6 +619,9 @@ async def session_busy(sid: str) -> bool:
     if not items:
         return False
     info = items[-1].get("info", {})
+    created = ((info.get("time") or {}).get("created")) or 0
+    if not created or time.time() - created / 1000 > STALE_AFTER:
+        return False
     role = info.get("role")
     if role == "user":
         return True
