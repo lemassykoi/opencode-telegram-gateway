@@ -5,9 +5,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/home/clement/.opencode/bin/opencode serve --port 4097 --hostname 127.0.0.1 --print-logs
-WorkingDirectory=/home/clement
-Environment=PATH=/home/clement/.opencode/bin:/home/clement/.local/bin:/home/clement/bin:/usr/local/cuda/bin:/opt/bin/:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+ExecStart=%h/.opencode/bin/opencode serve --port 4097 --hostname 127.0.0.1 --print-logs
+WorkingDirectory=%h
+Environment=PATH=%h/.opencode/bin:%h/.local/bin:%h/bin:/usr/local/cuda/bin:/opt/bin/:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Restart=on-failure
 RestartSec=3
