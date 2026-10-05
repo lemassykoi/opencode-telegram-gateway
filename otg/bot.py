@@ -81,6 +81,7 @@ COPY = {
         "stopping": "🛑 stopping…",
         "abort_failed": "abort failed ({status})",
         "perm": "🔐 Ask needs approval — {perm}\n{detail}",
+        "queued": "📥 queued — runs when the current turn finishes",
     },
     "fr": {
         "welcome": "Salut{name}! Je suis Ask — ta passerelle opencode. Chaque message "
@@ -104,6 +105,7 @@ COPY = {
         "stopping": "🛑 arrêt en cours…",
         "abort_failed": "échec de l'arrêt ({status})",
         "perm": "🔐 Ask a besoin d'approbation — {perm}\n{detail}",
+        "queued": "📥 mis en file — s'exécutera à la fin du tour en cours",
     },
 }
 MENU = ReplyKeyboardMarkup(
@@ -145,6 +147,7 @@ roles: dict[str, str] = {}  # opencode message_id -> role
 perm_msgs: dict[str, tuple[int, int]] = {}  # permission_id -> (chat_id, tg_message_id)
 unknown_notified: set[int] = set()
 sent_audio: set[str] = set()  # voicebox generation_ids already delivered to Telegram
+pending: dict[int, str] = {}  # chat_id -> one queued follow-up message (single slot)
 _bg_tasks: set[asyncio.Task] = set()
 
 
@@ -575,6 +578,8 @@ async def handle_event(ev: dict) -> None:
         if renderer:
             renderers.pop(sid, None)
             await renderer.finalize(memory_over_note(chat_id))
+            if chat_id in pending:
+                _spawn(drain_queue(chat_id, sid))
 
 
 async def ask_permission(chat_id: int, props: dict) -> None:
@@ -594,15 +599,43 @@ async def ask_permission(chat_id: int, props: dict) -> None:
     perm_msgs[pid] = (chat_id, msg.message_id)
 
 
+async def session_busy(sid: str) -> bool:
+    """Mid-turn heuristic: last message is an unanswered user msg or an
+    assistant msg without time.completed. (/session/status is {} even
+    during active turns in opencode 1.18.34 — do not trust it.)"""
+    try:
+        async with http.get(f"{OPENCODE_URL}/session/{sid}/message", timeout=API_TIMEOUT) as r:
+            if r.status != 200:
+                return False
+            items = await r.json()
+    except Exception:
+        return False
+    if not items:
+        return False
+    info = items[-1].get("info", {})
+    role = info.get("role")
+    if role == "user":
+        return True
+    return role == "assistant" and not (info.get("time") or {}).get("completed")
+
+
+async def seed_busy_renderers() -> None:
+    """After a bot restart, adopt opencode sessions that are mid-turn."""
+    for chat_id, meta in chats.items():
+        sid = meta.get("session_id")
+        if not sid or sid in renderers:
+            continue
+        if await session_busy(sid):
+            renderer = Renderer(chat_id, sid)
+            renderers[sid] = renderer
+            await renderer.show_placeholder()
+            log.info("boot: seeded renderer for busy session %s (chat %s)", sid, chat_id)
+
+
 async def resync() -> None:
     """After SSE reconnect: rebuild active renderers from history; finalize finished ones."""
     if not renderers:
         return
-    try:
-        async with http.get(f"{OPENCODE_URL}/session/status", timeout=API_TIMEOUT) as r:
-            statuses = await r.json() if r.status == 200 else {}
-    except Exception:
-        statuses = {}
     for sid, renderer in list(renderers.items()):
         try:
             async with http.get(f"{OPENCODE_URL}/session/{sid}/message", timeout=API_TIMEOUT) as r:
@@ -624,9 +657,11 @@ async def resync() -> None:
                     renderer.on_part(part)
         if renderer.pending_audio:
             _spawn(drain_audio(renderer))
-        if statuses.get(sid, {}).get("type", "idle") == "idle":
+        if not await session_busy(sid):
             renderers.pop(sid, None)
             await renderer.finalize()
+            if renderer.chat_id in pending:
+                _spawn(drain_queue(renderer.chat_id, sid))
 
 
 async def sse_loop() -> None:
@@ -766,6 +801,7 @@ async def cmd_agent(message: Message) -> None:
 
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
+    pending.pop(message.chat.id, None)
     sid = meta_of(message.chat.id).pop("session_id", None)
     if sid:
         renderers.pop(sid, None)
@@ -781,6 +817,7 @@ async def cmd_reset(message: Message) -> None:
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: Message) -> None:
+    pending.pop(message.chat.id, None)
     sid = chats.get(message.chat.id, {}).get("session_id")
     c = L(message.chat.id)
     if not sid or sid not in renderers:
@@ -816,24 +853,11 @@ async def on_perm_cb(cb: CallbackQuery) -> None:
     await cb.answer("ok" if ok else "failed to reach opencode", show_alert=not ok)
 
 
-@dp.message(F.text & ~F.text.startswith("/"))
-async def on_text(message: Message) -> None:
-    chat_id = message.chat.id
-    sid = await ensure_session(chat_id, message.from_user)
-    if sid in renderers:
-        await message.reply(L(chat_id)["still_working"])
-        return
+async def start_turn(chat_id: int, sid: str, text: str) -> None:
     renderer = Renderer(chat_id, sid)
     renderers[sid] = renderer
     await renderer.show_placeholder()
-    if not agents_cache:
-        await fetch_agents()
     meta = meta_of(chat_id)
-    uid = message.from_user.id if message.from_user else chat_id
-    if meta.get("user_id") != uid:
-        meta["user_id"] = uid
-        save_state()
-    text = f"{memory_prefix(uid)}\n\n{message.text}"
     body = build_prompt_body(meta.get("agent") or AGENT, text, meta.get("variant"))
     try:
         async with http.post(
@@ -850,7 +874,36 @@ async def on_text(message: Message) -> None:
                 await bot.delete_message(chat_id, renderer.msg_id)
             except Exception:
                 pass
-        await message.answer(f"⚠️ {exc}")
+        await tg_send(chat_id, f"⚠️ {exc}")
+
+
+async def drain_queue(chat_id: int, sid: str) -> None:
+    text = pending.pop(chat_id, None)
+    if text is None or sid in renderers:
+        return
+    uid = (chats.get(chat_id) or {}).get("user_id") or chat_id
+    await start_turn(chat_id, sid, f"{memory_prefix(uid)}\n\n{text}")
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def on_text(message: Message) -> None:
+    chat_id = message.chat.id
+    sid = await ensure_session(chat_id, message.from_user)
+    if sid in renderers:
+        if chat_id in pending:
+            await message.reply(L(chat_id)["still_working"])
+        else:
+            pending[chat_id] = message.text
+            await message.reply(L(chat_id)["queued"])
+        return
+    if not agents_cache:
+        await fetch_agents()
+    meta = meta_of(chat_id)
+    uid = message.from_user.id if message.from_user else chat_id
+    if meta.get("user_id") != uid:
+        meta["user_id"] = uid
+        save_state()
+    await start_turn(chat_id, sid, f"{memory_prefix(uid)}\n\n{message.text}")
 
 
 async def main() -> None:
@@ -865,6 +918,7 @@ async def main() -> None:
     except Exception:
         log.warning("could not update Telegram command menu")
     await fetch_agents()
+    await seed_busy_renderers()
     sse = asyncio.create_task(sse_loop())
     log.info("Ask starting: model=%s allowed=%d chats=%d", MODEL["modelID"], len(ALLOWED), len(chats))
     try:
